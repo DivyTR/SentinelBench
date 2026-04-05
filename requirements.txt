@@ -1,0 +1,2 @@
+# Dependencies will be added as modules are built.
+# Expected: azure-identity, azure-monitor-query, requests, click, rich, sqlite-utils
