@@ -1,2 +1,4 @@
-# Dependencies will be added as modules are built.
-# Expected: azure-identity, azure-monitor-query, requests, click, rich, sqlite-utils
+requests>=2.31.0
+python-dotenv>=1.0.0
+fastapi>=0.111.0
+uvicorn>=0.30.0

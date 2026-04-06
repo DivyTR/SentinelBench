@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-gray-950 text-gray-100;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { @apply bg-gray-900; }
+::-webkit-scrollbar-thumb { @apply bg-gray-600 rounded; }
+
+/* KQL code block */
+.kql-block {
+  @apply bg-gray-900 rounded-lg p-4 text-sm font-mono text-green-300
+         overflow-x-auto border border-gray-700;
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* Heatmap cell transitions */
+.heatmap-cell {
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+.heatmap-cell:hover {
+  opacity: 0.85;
+  transform: scale(1.05);
+}
