@@ -20,7 +20,7 @@ def test_suite_order_covers_every_technique_exactly_once():
 
 def test_log_clearing_runs_last():
     # It destroys host-side evidence of everything that ran before it.
-    assert V1_SUITE_ORDER[-1] == "T1070.001"
+    assert V1_SUITE_ORDER[-1] == "T1685.005"
 
 
 @pytest.mark.parametrize("tid", list(TECHNIQUES))

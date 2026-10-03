@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://python.org)
-[![MITRE ATT&CK](https://img.shields.io/badge/MITRE%20ATT%26CK-v14-red)](https://attack.mitre.org)
+[![MITRE ATT&CK](https://img.shields.io/badge/MITRE%20ATT%26CK-v19-red)](https://attack.mitre.org)
 [![Platform](https://img.shields.io/badge/SIEM-Microsoft%20Sentinel-0078D4)](https://azure.microsoft.com/en-us/products/microsoft-sentinel)
 
 ---
@@ -123,12 +123,12 @@ Both scenarios score as "detected" on a coverage report. Only one reflects a sec
 
 ## Techniques Covered in v1
 
-SentinelBench v1 covers **15 techniques** across four tactics chosen for high prevalence in real incident investigations and high variance in Sentinel's default detection coverage.
+SentinelBench v1 covers **15 techniques** across five ATT&CK v19 tactics, chosen for high prevalence in real incident investigations and high variance in Sentinel's default detection coverage.
 
 Each technique is pinned to **one specific Atomic Red Team test by GUID** (`art_guid` in `core/simulation_runner.py`), so every run executes exactly the same procedure. Test numbers are not used: they shift between ART releases, and test #1 is often a Linux or macOS test that Invoke-AtomicTest silently skips on Windows. SentinelBench also checks ART's output to confirm a test actually executed, rather than trusting the exit code.
 
 Two notes on IDs:
-- In its ATT&CK v19 migration, upstream ART moved *Clear Windows Event Logs* to `T1685.005` and *Disable or Modify Tools* to `T1685`. SentinelBench keeps the familiar IDs as its keys, runs the tests from ART's new folders, and accepts alerts tagged with either the old or the new ID.
+- SentinelBench uses **ATT&CK v19** IDs and tactics. v19 split the old Defense Evasion tactic (TA0005) into **Stealth** (TA0005) and **Defense Impairment** (TA0112), and revoked *Clear Windows Event Logs* (T1070.001 → T1685.005) and *Disable or Modify Tools* (T1562.001 → T1685). Sentinel analytics written before v19 still tag the old IDs, so alert matching accepts both.
 - Every upstream Windows test for T1110.001 needs Active Directory, so v1 uses a custom atomic in [`atomics/T1110.001`](atomics/T1110.001/T1110.001.yaml) that guesses passwords against a local account.
 
 ### Execution — 3 techniques
@@ -157,13 +157,18 @@ Two notes on IDs:
 | T1555.003 | Credentials from Web Browsers | Low severity by default in most rule sets despite high attacker value; severity accuracy test |
 | T1040 | Network Sniffing | Tests whether network telemetry is flowing; often reveals gaps in log source configuration |
 
-### Defense Evasion — 4 techniques
+### Stealth — 1 technique
 
 | ATT&CK ID | Technique | Why included |
 |-----------|-----------|--------------|
-| T1070.001 | Clear Windows Event Logs | Meta-technique: if an attacker runs this and Sentinel doesn't alert, all subsequent detections in that window are compromised |
-| T1562.001 | Disable or Modify Tools (AV) | Tests whether Defender for Endpoint telemetry is correctly forwarded to Sentinel |
 | T1027 | Obfuscated Files or Information | Tests behaviour-based vs signature-based detection; reveals over-reliance on static rules |
+
+### Defense Impairment — 3 techniques
+
+| ATT&CK ID | Technique | Why included |
+|-----------|-----------|--------------|
+| T1685.005 | Clear Windows Event Logs (T1070.001 before v19) | Meta-technique: if an attacker runs this and Sentinel doesn't alert, all subsequent detections in that window are compromised |
+| T1685 | Disable or Modify Tools (T1562.001 before v19) | Tests whether tampering with Defender is detected |
 | T1112 | Modify Registry | High false-positive volume technique; useful for testing whether severity suppression is misconfigured |
 
 ---
@@ -273,7 +278,7 @@ Latency measurements include Microsoft's own log ingestion pipeline, which adds 
 Generated rules are seeded with real event data from your lab environment but are not hardened against false positives in a production environment. Every generated rule must be reviewed, tested, and tuned before deployment. SentinelBench deliberately labels rule confidence and flags tuning requirements — it is a detection engineering accelerator, not an autonomous rule deployer.
 
 **4. 15 techniques is not comprehensive coverage.**
-MITRE ATT&CK v14 documents 600+ (sub-)techniques. SentinelBench v1 covers 15. It is a focused quality benchmark, not a full coverage audit. The techniques were selected for prevalence and detection variance, not completeness.
+MITRE ATT&CK documents 600+ (sub-)techniques. SentinelBench v1 covers 15. It is a focused quality benchmark, not a full coverage audit. The techniques were selected for prevalence and detection variance, not completeness.
 
 **5. Windows-only in v1.**
 All simulations target Windows endpoints. Linux, macOS, and cloud-native attack paths (e.g., T1078.004 — Valid Accounts: Cloud Accounts) are out of scope for v1.

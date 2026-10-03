@@ -334,10 +334,10 @@ SecurityEvent
     }
 
 
-def _gen_T1070_001(technique_id: str, raw_logs: list[dict]) -> dict:
+def _gen_T1685_005(technique_id: str, raw_logs: list[dict]) -> dict:
     """Clear Windows Event Logs detection."""
-    kql = """// T1070.001 — Clear Windows Event Logs
-// ATT&CK Tactic: Defense Evasion
+    kql = """// T1685.005 — Clear Windows Event Logs (T1070.001 before ATT&CK v19)
+// ATT&CK Tactic: Defense Impairment
 // Data source: SecurityEvent (Event ID 1102 — Security log cleared)
 //              System log (Event ID 104 — System log cleared)
 // Confidence: high
@@ -350,12 +350,12 @@ SecurityEvent
 | where EventID in (1102, 104)
 | project TimeGenerated, Computer, SubjectUserName,
           SubjectDomainName, Channel = "Security"
-| extend AttackTechnique = "T1070.001", Priority = "CRITICAL"
+| extend AttackTechnique = "T1685.005", Priority = "CRITICAL"
 | union (
     Event
     | where Source == "Microsoft-Windows-Eventlog"
     | where EventID == 104
-    | project TimeGenerated, Computer, AttackTechnique = "T1070.001",
+    | project TimeGenerated, Computer, AttackTechnique = "T1685.005",
               Priority = "CRITICAL"
 )
 """
@@ -419,7 +419,7 @@ _GENERATORS = {
     "T1136.001": _gen_T1136_001,
     "T1003.001": _gen_T1003_001,
     "T1110.001": _gen_T1110_001,
-    "T1070.001": _gen_T1070_001,
+    "T1685.005": _gen_T1685_005,
     # Remaining techniques fall through to _generic_generator
     # and will be replaced with specific implementations in v1.1
 }

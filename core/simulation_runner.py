@@ -40,12 +40,13 @@ from typing import Optional
 # the upstream atomics as of ART master 2026-09.
 #
 # Field reference
-#   technique_id  key used throughout SentinelBench (DB, dashboard, KQL)
-#   art_technique folder name in the atomics repo.  Differs from technique_id
-#                 where ART has migrated to newer ATT&CK numbering.
+#   technique_id  ATT&CK v19 ID; key used throughout SentinelBench
+#   tactic        primary ATT&CK v19 tactic (some techniques have several)
+#   art_technique folder name in the atomics repo
 #   match_ids     every ATT&CK ID an alert may carry for this technique.
-#                 Sentinel content and ART do not always use the same ATT&CK
-#                 version, so alert matching accepts all of them.
+#                 ATT&CK v19 revoked some IDs (e.g. T1070.001 -> T1685.005);
+#                 Sentinel content written before v19 still uses the old
+#                 ones, so alert matching accepts both.
 #   art_guid      auto_generated_guid of the pinned atomic test
 #   input_args    overrides for the test's input_arguments (optional)
 #   atomics       "upstream" (C:\AtomicRedTeam\atomics) or "custom"
@@ -202,13 +203,13 @@ TECHNIQUES: dict[str, dict] = {
         "cleanup":           True,
     },
 
-    # ── Defense Evasion ───────────────────────────────────────────────────────
-    "T1070.001": {
+    # ── Stealth / Defense Impairment (v19 split of Defense Evasion) ──────────
+    "T1685.005": {
         "name":              "Clear Windows Event Logs",
-        "tactic":            "Defense Evasion",
+        "tactic":            "Defense Impairment",
         "severity_expected": "High",
-        "art_technique":     "T1685.005",   # ART moved this in its ATT&CK v19 migration
-        "match_ids":         ["T1070.001", "T1070", "T1685.005", "T1685"],
+        "art_technique":     "T1685.005",
+        "match_ids":         ["T1685.005", "T1685", "T1070.001", "T1070"],  # T1070.001 pre-v19
         "art_guid":          "e6abb60e-26b8-41da-8aae-0c35174b0967",
         "input_args":        {"log_name": "Security"},
         "atomics":           "upstream",
@@ -217,12 +218,12 @@ TECHNIQUES: dict[str, dict] = {
                              "host-side evidence of everything before it.",
         "cleanup":           False,   # log clearing is its own cleanup
     },
-    "T1562.001": {
+    "T1685": {
         "name":              "Disable or Modify Tools",
-        "tactic":            "Defense Evasion",
+        "tactic":            "Defense Impairment",
         "severity_expected": "High",
-        "art_technique":     "T1685",       # ART moved this in its ATT&CK v19 migration
-        "match_ids":         ["T1562.001", "T1562", "T1685"],
+        "art_technique":     "T1685",
+        "match_ids":         ["T1685", "T1562.001", "T1562"],  # T1562.001 pre-v19
         "art_guid":          "aa875ed4-8935-47e2-b2c5-6ec00ab220d2",
         "atomics":           "upstream",
         "description":       "Attempts to stop and disable the WinDefend service with "
@@ -232,7 +233,7 @@ TECHNIQUES: dict[str, dict] = {
     },
     "T1027": {
         "name":              "Obfuscated Files or Information",
-        "tactic":            "Defense Evasion",
+        "tactic":            "Stealth",
         "severity_expected": "Medium",
         "art_technique":     "T1027",
         "match_ids":         ["T1027"],
@@ -244,7 +245,7 @@ TECHNIQUES: dict[str, dict] = {
     },
     "T1112": {
         "name":              "Modify Registry",
-        "tactic":            "Defense Evasion",
+        "tactic":            "Defense Impairment",
         "severity_expected": "Medium",
         "art_technique":     "T1112",
         "match_ids":         ["T1112"],
@@ -270,9 +271,9 @@ V1_SUITE_ORDER = [
     "T1040",      # Network sniffing
     "T1112",      # Modify registry
     "T1027",      # Obfuscation
-    "T1562.001",  # Disable AV
+    "T1685",      # Disable AV (T1562.001 before ATT&CK v19)
     "T1003.001",  # LSASS (high-impact — run near end)
-    "T1070.001",  # Clear logs (always last — meta-technique)
+    "T1685.005",  # Clear logs (always last; T1070.001 before ATT&CK v19)
 ]
 
 

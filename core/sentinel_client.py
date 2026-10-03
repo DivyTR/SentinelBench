@@ -291,9 +291,9 @@ TECHNIQUE_EVENT_HINTS: dict[str, dict] = {
     "T1555.003": {"table": "SecurityEvent",  "event_ids": [4688]},        # Browser proc
     "T1040":     {"table": "SecurityEvent",  "event_ids": [4688]},        # Network sniffer
 
-    # Defense Evasion
-    "T1070.001": {"table": "SecurityEvent",  "event_ids": [1102]},        # Security log cleared
-    "T1562.001": {"table": "SecurityEvent",  "event_ids": [4688]},        # sc.exe stop WinDefend
+    # Stealth / Defense Impairment
+    "T1685.005": {"table": "SecurityEvent",  "event_ids": [1102]},        # Security log cleared
+    "T1685":     {"table": "SecurityEvent",  "event_ids": [4688]},        # sc.exe stop WinDefend
     "T1027":     {"table": "SecurityEvent",  "event_ids": [4688]},        # Obfuscated exec
     "T1112":     {"table": "Event",          "event_ids": [13, 14]},      # Sysmon reg modification (Event table)
 }
