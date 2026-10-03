@@ -17,7 +17,6 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from .metrics_engine import severity_delta
 
@@ -150,7 +149,7 @@ def finish_run(run_id: str, path: Path = DB_PATH) -> None:
         )
 
 
-def get_run(run_id: str, path: Path = DB_PATH) -> Optional[dict]:
+def get_run(run_id: str, path: Path = DB_PATH) -> dict | None:
     with get_connection(path) as conn:
         row = conn.execute(
             "SELECT * FROM runs WHERE run_id = ?", (run_id,)
@@ -176,16 +175,16 @@ def save_result(
     timestamp_exec: str,
     caught: bool,
     severity_expected: str,
-    timestamp_alert: Optional[str] = None,
-    latency_seconds: Optional[float] = None,
-    severity_assigned: Optional[str] = None,
-    poll_checkpoint: Optional[str] = None,
-    raw_log_sample: Optional[str] = None,
-    art_guid: Optional[str] = None,
-    alert_name: Optional[str] = None,
-    alert_provider: Optional[str] = None,
-    alert_matched_ids: Optional[str] = None,
-    timestamp_alert_ingested: Optional[str] = None,
+    timestamp_alert: str | None = None,
+    latency_seconds: float | None = None,
+    severity_assigned: str | None = None,
+    poll_checkpoint: str | None = None,
+    raw_log_sample: str | None = None,
+    art_guid: str | None = None,
+    alert_name: str | None = None,
+    alert_provider: str | None = None,
+    alert_matched_ids: str | None = None,
+    timestamp_alert_ingested: str | None = None,
     path: Path = DB_PATH,
 ) -> str:
     """Insert a result row and return its result_id."""

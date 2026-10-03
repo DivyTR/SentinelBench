@@ -30,10 +30,8 @@ import shutil
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 import requests
-
 
 # ── token cache (in-memory, per-process, per auth mode) ──────────────────────
 
@@ -70,11 +68,11 @@ class SentinelClient:
 
     def __init__(
         self,
-        workspace_id: Optional[str] = None,
-        auth: Optional[str] = None,
-        tenant_id: Optional[str] = None,
-        client_id: Optional[str] = None,
-        client_secret: Optional[str] = None,
+        workspace_id: str | None = None,
+        auth: str | None = None,
+        tenant_id: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
     ):
         self.workspace_id = workspace_id or _require_env("SENTINEL_WORKSPACE_ID")
         self.auth = auth or os.environ.get("SENTINEL_AUTH") or _default_auth_mode()
@@ -155,7 +153,7 @@ class SentinelClient:
         proc = subprocess.run(
             [az, "account", "get-access-token",
              "--resource", LOG_ANALYTICS_RESOURCE, "--output", "json"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, check=False,
         )
         if proc.returncode != 0:
             raise SentinelClientError(
@@ -212,8 +210,8 @@ class SentinelClient:
         match_ids: list[str],
         since: datetime,
         until: datetime,
-        host: Optional[str] = None,
-    ) -> Optional[dict]:
+        host: str | None = None,
+    ) -> dict | None:
         """
         Return the earliest Sentinel alert created in [since, until] that is
         tagged with one of `match_ids`, or None.
@@ -281,7 +279,7 @@ SecurityIncident
         technique_id: str,
         exec_time: datetime,
         window_minutes: int = 5,
-        host: Optional[str] = None,
+        host: str | None = None,
     ) -> list[dict]:
         """
         Pull the raw Windows Security Event / Sysmon logs generated during

@@ -17,25 +17,25 @@ Endpoints:
     GET /health                      liveness check
 """
 
-import sys
 import os
+import sys
 
 # Allow running from repo root: python dashboard/api.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
 
 from core.db import (
-    list_runs,
-    get_run,
-    get_results_for_run,
     get_kql_for_run,
+    get_results_for_run,
+    get_run,
+    list_runs,
     run_summary,
 )
-from core.simulation_runner import TECHNIQUES, V1_SUITE_ORDER
 from core.metrics_engine import latency_band
+from core.simulation_runner import TECHNIQUES, V1_SUITE_ORDER
 
 app = FastAPI(
     title="SentinelBench API",

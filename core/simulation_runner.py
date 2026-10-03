@@ -29,8 +29,6 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
-
 
 # ── technique registry ────────────────────────────────────────────────────────
 # Each v1 technique is pinned to one specific ART test by GUID.  Test numbers
@@ -438,7 +436,7 @@ def _build_art_command(
     art_guid: str,
     atomics_dir: str,
     module_path: str,
-    input_args: Optional[dict] = None,
+    input_args: dict | None = None,
     flag: str = "",
 ) -> list[str]:
     """Build the PowerShell command list for subprocess."""
@@ -478,6 +476,7 @@ def _run_powershell(cmd: list[str], timeout: int = 120) -> dict:
             capture_output=True,
             text=True,
             timeout=timeout,
+            check=False,   # exit codes are inspected below
         )
         return {
             "success": proc.returncode == 0,
@@ -492,7 +491,7 @@ def _run_powershell(cmd: list[str], timeout: int = 120) -> dict:
             "stderr":  "",
             "error":   f"Timed out after {timeout}s",
         }
-    except Exception as exc:
+    except OSError as exc:   # e.g. powershell.exe not found
         return {
             "success": False,
             "stdout":  "",

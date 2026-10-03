@@ -13,9 +13,9 @@ def path(tmp_path):
 
 
 def _result(run_id, path, **kw):
-    base = dict(run_id=run_id, technique_id="T1112", technique_name="Modify Registry",
-                tactic="Defense Evasion", timestamp_exec="2026-10-03T10:00:00+00:00",
-                caught=True, severity_expected="Medium", path=path)
+    base = {"run_id": run_id, "technique_id": "T1112", "technique_name": "Modify Registry",
+            "tactic": "Defense Impairment", "timestamp_exec": "2026-10-03T10:00:00+00:00",
+            "caught": True, "severity_expected": "Medium", "path": path}
     return db.save_result(**{**base, **kw})
 
 

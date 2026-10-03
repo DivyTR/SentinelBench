@@ -24,10 +24,10 @@ We note this lag in all latency outputs so results are interpreted correctly.
 
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
-from .sentinel_client import SentinelClient
+import requests
 
+from .sentinel_client import SentinelClient, SentinelClientError
 
 # ── latency thresholds (seconds) ──────────────────────────────────────────────
 
@@ -40,7 +40,7 @@ LATENCY_RED    = 900    # > 10 min — unlikely to prevent attacker progress
 POLL_CHECKPOINTS_MINUTES = [2, 5, 10, 15]
 
 
-def latency_band(latency_seconds: Optional[float]) -> str:
+def latency_band(latency_seconds: float | None) -> str:
     """Return a human-readable band label for a latency value."""
     if latency_seconds is None:
         return "missed"
@@ -71,9 +71,9 @@ class MetricsEngine:
 
     def __init__(
         self,
-        client: Optional[SentinelClient],
+        client: SentinelClient | None,
         dry_run: bool = False,
-        host: Optional[str] = None,
+        host: str | None = None,
         clock=None,
         sleep=time.sleep,
     ):
@@ -186,7 +186,7 @@ class MetricsEngine:
 _SEVERITY_RANK = {"informational": 0, "low": 1, "medium": 2, "high": 3}
 
 
-def severity_delta(assigned: Optional[str], expected: Optional[str]) -> Optional[int]:
+def severity_delta(assigned: str | None, expected: str | None) -> int | None:
     """
     expected - assigned, on the scale Informational(0) .. High(3).
 
@@ -234,7 +234,7 @@ def _calc_latency(exec_time: datetime, alert_time: datetime) -> float:
     return max(0.0, delta)
 
 
-def _extract_severity(alert_row: dict) -> Optional[str]:
+def _extract_severity(alert_row: dict) -> str | None:
     """Pull the severity string from an alert row, normalised to Title Case."""
     raw = alert_row.get("AlertSeverity") or alert_row.get("Severity")
     return raw.strip().title() if raw else None
@@ -244,12 +244,16 @@ def _safe_fetch_logs(
     client: SentinelClient,
     technique_id: str,
     exec_time: datetime,
-    host: Optional[str] = None,
+    host: str | None = None,
 ) -> list[dict]:
-    """Fetch raw event logs; return empty list on any failure."""
+    """
+    Fetch raw event logs for KQL seeding.  Best-effort: a query or network
+    failure here must not lose the caught/missed measurement, so it degrades
+    to an empty list.  Programming errors still propagate.
+    """
     try:
         return client.fetch_raw_logs(technique_id, exec_time, window_minutes=5, host=host)
-    except Exception as exc:
+    except (SentinelClientError, requests.RequestException, ValueError) as exc:
         print(f"    [obs] Warning: could not fetch raw logs — {exc}")
         return []
 

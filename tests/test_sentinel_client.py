@@ -27,7 +27,7 @@ def test_parse_response_zips_columns_and_rows():
 
 def test_kql_datetime_requires_timezone_and_converts_to_utc():
     with pytest.raises(ValueError):
-        sc._kql_datetime(datetime(2026, 10, 3, 10, 0))
+        sc._kql_datetime(datetime(2026, 10, 3, 10, 0))  # noqa: DTZ001 - naive on purpose
     ist = timezone(timedelta(hours=5, minutes=30))
     assert sc._kql_datetime(datetime(2026, 10, 3, 15, 30, tzinfo=ist)) == "2026-10-03T10:00:00.000000Z"
 

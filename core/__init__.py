@@ -9,18 +9,18 @@ core — SentinelBench internal modules.
 """
 
 from .db import init_db
-from .sentinel_client import SentinelClient
-from .simulation_runner import SimulationRunner, TECHNIQUES, V1_SUITE_ORDER
-from .metrics_engine import MetricsEngine, latency_band
 from .kql_generator import KQLGenerator
+from .metrics_engine import MetricsEngine, latency_band
+from .sentinel_client import SentinelClient
+from .simulation_runner import TECHNIQUES, V1_SUITE_ORDER, SimulationRunner
 
 __all__ = [
-    "init_db",
-    "SentinelClient",
-    "SimulationRunner",
     "TECHNIQUES",
     "V1_SUITE_ORDER",
-    "MetricsEngine",
-    "latency_band",
     "KQLGenerator",
+    "MetricsEngine",
+    "SentinelClient",
+    "SimulationRunner",
+    "init_db",
+    "latency_band",
 ]

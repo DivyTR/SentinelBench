@@ -1,6 +1,6 @@
 import pytest
 
-from core import KQLGenerator, TECHNIQUES
+from core import TECHNIQUES, KQLGenerator
 
 
 @pytest.mark.parametrize("tid", list(TECHNIQUES))

@@ -34,6 +34,8 @@ import socket
 import sys
 from datetime import datetime
 
+import requests
+
 # Load .env before importing core modules so env vars are available
 try:
     from dotenv import load_dotenv
@@ -42,25 +44,25 @@ except ImportError:
     print("[warn] python-dotenv not installed — reading env vars from shell only")
 
 from core import (
-    init_db,
-    SentinelClient,
-    SimulationRunner,
     TECHNIQUES,
     V1_SUITE_ORDER,
-    MetricsEngine,
     KQLGenerator,
+    MetricsEngine,
+    SentinelClient,
+    SimulationRunner,
+    init_db,
 )
 from core.db import (
     create_run,
     finish_run,
-    save_result,
-    save_kql_suggestion,
-    run_summary,
-    list_runs,
-    get_results_for_run,
     get_kql_for_run,
+    get_results_for_run,
+    list_runs,
+    run_summary,
+    save_kql_suggestion,
+    save_result,
 )
-
+from core.sentinel_client import SentinelClientError
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
@@ -164,7 +166,7 @@ def main() -> None:
             print("[auth] Testing Sentinel connection ...")
             client.test_connection()
             print("[auth] Connected to Log Analytics workspace ✓")
-        except Exception as exc:
+        except (SentinelClientError, requests.RequestException) as exc:
             print(f"[error] Sentinel connection failed: {exc}")
             print("        Check your .env credentials or use --dry-run to test the pipeline.")
             sys.exit(1)
