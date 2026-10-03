@@ -1,0 +1,202 @@
+# SentinelBench lab VM bootstrap.
+#
+# Rendered by Terraform (templatefile) and run once as SYSTEM via a VM run
+# command. Safe to re-run: every step checks or overwrites its own state.
+#
+# Produces C:\SentinelBench\provenance.json recording exactly what was
+# installed (Sysmon version, config hash, ART commits, audit policy), which
+# belongs in the methodology section of any write-up of results.
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference    = 'SilentlyContinue'   # Invoke-WebRequest is very slow with the progress bar
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$Root = 'C:\SentinelBench'
+$Downloads = Join-Path $Root 'downloads'
+New-Item -ItemType Directory -Force -Path $Root, $Downloads | Out-Null
+Start-Transcript -Path (Join-Path $Root 'bootstrap.log') -Append | Out-Null
+
+function Step($message) { Write-Host "`n=== $message ===" }
+
+function Get-File($url, $name) {
+    $path = Join-Path $Downloads $name
+    Invoke-WebRequest -Uri $url -OutFile $path -UseBasicParsing
+    return $path
+}
+
+function Assert-Signed($path, $expectedSigner) {
+    $sig = Get-AuthenticodeSignature -FilePath $path
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch $expectedSigner) {
+        throw "Signature check failed for $path : status=$($sig.Status) subject=$($sig.SignerCertificate.Subject)"
+    }
+}
+
+# ── 1. Audit policy ──────────────────────────────────────────────────────────
+# Windows Server's default audit policy does not generate several events the
+# v1 techniques depend on (e.g. 4688 command lines, 4698 task creation).
+Step 'Audit policy'
+$auditSettings = @(
+    @('Process Creation',            '/success:enable'),                    # 4688
+    @('Logon',                       '/success:enable', '/failure:enable'), # 4624/4625
+    @('Account Lockout',             '/failure:enable'),                    # 4625 lockout status
+    @('User Account Management',     '/success:enable', '/failure:enable'), # 4720
+    @('Security Group Management',   '/success:enable'),                    # 4732
+    @('Security System Extension',   '/success:enable'),                    # 4697
+    @('Other Object Access Events',  '/success:enable'),                    # 4698/4702
+    @('Audit Policy Change',         '/success:enable'),                    # 4719
+    @('Sensitive Privilege Use',     '/success:enable', '/failure:enable')  # 4673
+)
+foreach ($s in $auditSettings) {
+    $auditArgs = @("/set", "/subcategory:$($s[0])") + $s[1..($s.Count - 1)]
+    & auditpol.exe @auditArgs | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "auditpol failed for $($s[0])" }
+}
+# Include the command line in 4688 events.
+New-Item -Force -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit' | Out-Null
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit' `
+    -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -Type DWord
+# PowerShell script block logging (event 4104).
+New-Item -Force -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' | Out-Null
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' `
+    -Name EnableScriptBlockLogging -Value 1 -Type DWord
+# Room for a full benchmark run in the local Security log.
+& wevtutil.exe sl Security /ms:268435456
+
+# ── 2. Sysmon ────────────────────────────────────────────────────────────────
+Step 'Sysmon'
+$sysmonZip = Get-File 'https://download.sysinternals.com/files/Sysmon.zip' 'Sysmon.zip'
+$sysmonDir = Join-Path $Root 'sysmon'
+Expand-Archive -Path $sysmonZip -DestinationPath $sysmonDir -Force
+$sysmonExe = Join-Path $sysmonDir 'Sysmon64.exe'
+Assert-Signed $sysmonExe 'Microsoft Corporation'
+
+$sysmonConfig = Get-File '${sysmon_config_url}' 'sysmonconfig.xml'
+$configHash = (Get-FileHash -Algorithm SHA256 $sysmonConfig).Hash.ToLower()
+if ($configHash -ne '${sysmon_config_sha256}') {
+    throw "Sysmon config hash mismatch: got $configHash"
+}
+
+if (Get-Service -Name Sysmon64 -ErrorAction SilentlyContinue) {
+    & $sysmonExe -c $sysmonConfig | Out-Null           # update config in place
+} else {
+    & $sysmonExe -accepteula -i $sysmonConfig | Out-Null
+}
+if ($LASTEXITCODE -ne 0) { throw "Sysmon install/config failed ($LASTEXITCODE)" }
+$sysmonVersion = (Get-Item $sysmonExe).VersionInfo.ProductVersion
+
+# ── 3. Atomic Red Team ───────────────────────────────────────────────────────
+Step 'Atomic Red Team'
+$artRoot = 'C:\AtomicRedTeam'
+New-Item -ItemType Directory -Force -Path $artRoot | Out-Null
+
+# Defender would quarantine ART's payload folders before a test can run.
+# Excluding the *folder* only affects static scanning of files stored there;
+# behaviour monitoring, AMSI and tamper protection still apply to what the
+# tests do. This trade-off is recorded in provenance.json.
+Add-MpPreference -ExclusionPath $artRoot
+
+# powershell-yaml is required by Invoke-AtomicTest; install machine-wide so it
+# is available to the admin user, not just SYSTEM.
+Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+Install-Module -Name powershell-yaml -Scope AllUsers -Force
+
+# Execution framework, pinned.
+$iartZip = Get-File 'https://github.com/redcanaryco/invoke-atomicredteam/archive/${invoke_art_commit}.zip' 'invoke-atomicredteam.zip'
+$iartTmp = Join-Path $Downloads 'iart'
+Remove-Item -Recurse -Force $iartTmp -ErrorAction SilentlyContinue
+Expand-Archive -Path $iartZip -DestinationPath $iartTmp -Force
+Remove-Item -Recurse -Force (Join-Path $artRoot 'invoke-atomicredteam') -ErrorAction SilentlyContinue
+Move-Item (Get-ChildItem $iartTmp -Directory | Select-Object -First 1).FullName (Join-Path $artRoot 'invoke-atomicredteam')
+
+# Atomics, pinned.
+$atomicsZip = Get-File 'https://github.com/redcanaryco/atomic-red-team/archive/${art_atomics_commit}.zip' 'atomic-red-team.zip'
+$atomicsTmp = Join-Path $Downloads 'atomics'
+Remove-Item -Recurse -Force $atomicsTmp -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $atomicsTmp | Out-Null
+# tar.exe (built into Windows Server 2019+) copes with the repo's deep paths,
+# where Expand-Archive on Windows PowerShell 5.1 can hit the 260-char limit.
+# Extract only the atomics folder; the rest of the repo is not needed.
+& tar.exe -xf $atomicsZip -C $atomicsTmp 'atomic-red-team-${art_atomics_commit}/atomics'
+if ($LASTEXITCODE -ne 0) { throw "Extracting atomics failed ($LASTEXITCODE)" }
+Remove-Item -Recurse -Force (Join-Path $artRoot 'atomics') -ErrorAction SilentlyContinue
+Move-Item (Join-Path $atomicsTmp 'atomic-red-team-${art_atomics_commit}\atomics') (Join-Path $artRoot 'atomics')
+Remove-Item -Recurse -Force $atomicsTmp, $atomicsZip
+
+Import-Module (Join-Path $artRoot 'invoke-atomicredteam\Invoke-AtomicRedTeam.psd1') -Force
+Write-Host "Invoke-AtomicTest available: $([bool](Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue))"
+
+# ── 4. Python + SentinelBench ────────────────────────────────────────────────
+Step 'Python'
+$pythonVersion = '3.12.10'
+$pythonExe = 'C:\Program Files\Python312\python.exe'
+if (-not (Test-Path $pythonExe)) {
+    $installer = Get-File "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-amd64.exe" 'python-installer.exe'
+    Assert-Signed $installer 'Python Software Foundation'
+    $p = Start-Process -FilePath $installer -Wait -PassThru `
+        -ArgumentList '/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0'
+    if ($p.ExitCode -ne 0) { throw "Python installer exited $($p.ExitCode)" }
+}
+
+Step 'SentinelBench'
+$appDir = Join-Path $Root 'app'
+$sbInstalled = $false
+try {
+    $sbZip = Get-File 'https://github.com/${sentinelbench_repo}/archive/${sentinelbench_ref}.zip' 'sentinelbench.zip'
+    $sbTmp = Join-Path $Downloads 'sb'
+    Remove-Item -Recurse -Force $sbTmp -ErrorAction SilentlyContinue
+    Expand-Archive -Path $sbZip -DestinationPath $sbTmp -Force
+    # Keep the local database across re-runs of this script.
+    $dbBackup = $null
+    if (Test-Path (Join-Path $appDir 'sentinelbench.db')) {
+        $dbBackup = Join-Path $Root 'sentinelbench.db.bak'
+        Copy-Item (Join-Path $appDir 'sentinelbench.db') $dbBackup -Force
+    }
+    Remove-Item -Recurse -Force $appDir -ErrorAction SilentlyContinue
+    Move-Item (Get-ChildItem $sbTmp -Directory | Select-Object -First 1).FullName $appDir
+    if ($dbBackup) { Copy-Item $dbBackup (Join-Path $appDir 'sentinelbench.db') -Force }
+
+    & $pythonExe -m pip install --disable-pip-version-check -q -r (Join-Path $appDir 'requirements.txt')
+    if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+
+    @"
+SENTINEL_AUTH=managed_identity
+SENTINEL_WORKSPACE_ID=${workspace_id}
+POLL_INTERVAL_MINUTES=2
+MAX_WAIT_MINUTES=15
+ART_ATOMICS_DIR=C:\AtomicRedTeam\atomics
+ART_MODULE_PATH=C:\AtomicRedTeam\invoke-atomicredteam\Invoke-AtomicRedTeam.psd1
+"@ | Set-Content -Path (Join-Path $appDir '.env') -Encoding ASCII
+    $sbInstalled = $true
+} catch {
+    # A private repo or a typo in the ref should not fail the whole lab build;
+    # SentinelBench can be copied over RDP instead.
+    Write-Warning "SentinelBench download/install skipped: $_"
+}
+
+# ── 5. Provenance ────────────────────────────────────────────────────────────
+Step 'Provenance'
+$auditPolicy = (& auditpol.exe /get /category:* /r | ConvertFrom-Csv |
+    Where-Object { $_.'Inclusion Setting' -ne 'No Auditing' } |
+    ForEach-Object { "$($_.Subcategory): $($_.'Inclusion Setting')" })
+
+[ordered]@{
+    bootstrapped_at_utc   = (Get-Date).ToUniversalTime().ToString('o')
+    os                    = (Get-CimInstance Win32_OperatingSystem | ForEach-Object { "$($_.Caption) $($_.Version)" })
+    sysmon_version        = $sysmonVersion
+    sysmon_config_url     = '${sysmon_config_url}'
+    sysmon_config_sha256  = $configHash
+    invoke_art_commit     = '${invoke_art_commit}'
+    art_atomics_commit    = '${art_atomics_commit}'
+    defender_exclusions   = @($artRoot)
+    defender_realtime_on  = -not (Get-MpPreference).DisableRealtimeMonitoring
+    python_version        = (& $pythonExe --version)
+    sentinelbench_repo    = '${sentinelbench_repo}'
+    sentinelbench_ref     = '${sentinelbench_ref}'
+    sentinelbench_ready   = $sbInstalled
+    audit_policy          = $auditPolicy
+} | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $Root 'provenance.json') -Encoding UTF8
+
+Write-Host "`nBootstrap complete. See $Root\provenance.json"
+Stop-Transcript | Out-Null
+exit 0

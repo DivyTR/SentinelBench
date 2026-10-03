@@ -85,3 +85,81 @@ def test_raw_log_query_uses_sysmon_source_for_event_table():
     kql = client.calls[0][0]
     assert 'Source == "Microsoft-Windows-Sysmon"' in kql
     assert 'Computer startswith "sb-lab"' in kql
+
+
+# ── authentication ─────────────────────────────────────────────────────────────
+
+class FakeResponse:
+    def __init__(self, status, payload):
+        self.status_code, self._payload, self.text = status, payload, str(payload)
+
+    def json(self):
+        return self._payload
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    for v in ("SENTINEL_AUTH", "SENTINEL_TENANT_ID", "SENTINEL_CLIENT_ID",
+              "SENTINEL_CLIENT_SECRET"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "ws")
+    sc._token_cache.clear()
+
+
+def test_auth_mode_is_required_without_client_secret_vars():
+    with pytest.raises(sc.SentinelClientError, match="SENTINEL_AUTH"):
+        sc.SentinelClient()
+
+
+def test_client_secret_is_the_default_when_its_vars_are_set(monkeypatch):
+    for v in ("SENTINEL_TENANT_ID", "SENTINEL_CLIENT_ID", "SENTINEL_CLIENT_SECRET"):
+        monkeypatch.setenv(v, "x")
+    assert sc.SentinelClient().auth == "client_secret"
+
+
+def test_unknown_auth_mode_is_rejected(monkeypatch):
+    monkeypatch.setenv("SENTINEL_AUTH", "password")
+    with pytest.raises(sc.SentinelClientError):
+        sc.SentinelClient()
+
+
+def test_managed_identity_uses_imds_without_proxy_and_caches(monkeypatch):
+    calls = []
+
+    class FakeSession:
+        trust_env = True
+
+        def get(self, url, params, headers, timeout):
+            calls.append((url, params, headers, self.trust_env))
+            return FakeResponse(200, {"access_token": "mi-token", "expires_in": "3599"})
+
+    monkeypatch.setattr(sc.requests, "Session", FakeSession)
+    client = sc.SentinelClient(auth="managed_identity")
+    assert client.get_token() == "mi-token"
+    assert client.get_token() == "mi-token"
+    assert len(calls) == 1
+    url, params, headers, trust_env = calls[0]
+    assert url == sc.IMDS_TOKEN_URL
+    assert params["resource"] == "https://api.loganalytics.io"
+    assert headers == {"Metadata": "true"}
+    assert trust_env is False
+
+
+def test_azure_cli_token(monkeypatch):
+    monkeypatch.setattr(sc.shutil, "which", lambda name: "/usr/bin/az")
+
+    class Proc:
+        returncode = 0
+        stdout = '{"accessToken": "cli-token", "expires_on": 4102444800}'
+        stderr = ""
+
+    seen = {}
+    monkeypatch.setattr(sc.subprocess, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and Proc())
+    assert sc.SentinelClient(auth="azure_cli").get_token() == "cli-token"
+    assert "https://api.loganalytics.io" in seen["cmd"]
+
+
+def test_azure_cli_missing_gives_clear_error(monkeypatch):
+    monkeypatch.setattr(sc.shutil, "which", lambda name: None)
+    with pytest.raises(sc.SentinelClientError, match="not on PATH"):
+        sc.SentinelClient(auth="azure_cli").get_token()

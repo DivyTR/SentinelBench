@@ -5,22 +5,29 @@ Microsoft Sentinel / Log Analytics API client.
 
 Authentication
 --------------
-Uses the OAuth 2.0 client-credentials flow against the Azure AD token endpoint.
-Credentials are read from environment variables (never hardcoded).
+SENTINEL_AUTH selects how the client gets a Log Analytics token:
 
-Required env vars (set in .env and loaded by sentinelbench.py via python-dotenv):
-  SENTINEL_TENANT_ID
-  SENTINEL_CLIENT_ID
-  SENTINEL_CLIENT_SECRET
-  SENTINEL_WORKSPACE_ID
+  managed_identity  The Azure VM's system-assigned identity, via the Instance
+                    Metadata Service. The default on the lab VM built by
+                    infra/terraform: no secret exists anywhere.
+  azure_cli         Whatever `az login` session is active. Convenient for
+                    querying from a laptop.
+  client_secret     App registration + secret (OAuth client-credentials).
+                    Needs SENTINEL_TENANT_ID, SENTINEL_CLIENT_ID and
+                    SENTINEL_CLIENT_SECRET.
 
-The App Registration in Azure AD needs the following API permission:
-  Microsoft.OperationalInsights / Data.Read   (application permission)
-and must be granted admin consent.
+If SENTINEL_AUTH is unset, client_secret is used when its three variables
+are present (the original behaviour).
+
+Whichever identity is used needs the "Log Analytics Reader" role on the
+workspace. SENTINEL_WORKSPACE_ID is always required.
 """
 
+import json
 import os
 import re
+import shutil
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -28,17 +35,21 @@ from typing import Optional
 import requests
 
 
-# ── token cache (in-memory, per-process) ─────────────────────────────────────
+# ── token cache (in-memory, per-process, per auth mode) ──────────────────────
 
-_token_cache: dict = {"token": None, "expires_at": 0}
+_token_cache: dict = {}
 
 TOKEN_URL_TEMPLATE = (
     "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 )
-RESOURCE_SCOPE = "https://api.loganalytics.io/.default"
+LOG_ANALYTICS_RESOURCE = "https://api.loganalytics.io"
+RESOURCE_SCOPE = LOG_ANALYTICS_RESOURCE + "/.default"
+IMDS_TOKEN_URL = "http://169.254.169.254/metadata/identity/oauth2/token"
 QUERY_URL_TEMPLATE = (
     "https://api.loganalytics.io/v1/workspaces/{workspace_id}/query"
 )
+
+AUTH_MODES = ("managed_identity", "azure_cli", "client_secret")
 
 
 class SentinelClientError(Exception):
@@ -59,45 +70,102 @@ class SentinelClient:
 
     def __init__(
         self,
+        workspace_id: Optional[str] = None,
+        auth: Optional[str] = None,
         tenant_id: Optional[str] = None,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
-        workspace_id: Optional[str] = None,
     ):
-        self.tenant_id     = tenant_id     or _require_env("SENTINEL_TENANT_ID")
-        self.client_id     = client_id     or _require_env("SENTINEL_CLIENT_ID")
-        self.client_secret = client_secret or _require_env("SENTINEL_CLIENT_SECRET")
-        self.workspace_id  = workspace_id  or _require_env("SENTINEL_WORKSPACE_ID")
+        self.workspace_id = workspace_id or _require_env("SENTINEL_WORKSPACE_ID")
+        self.auth = auth or os.environ.get("SENTINEL_AUTH") or _default_auth_mode()
+        if self.auth not in AUTH_MODES:
+            raise SentinelClientError(
+                f"SENTINEL_AUTH must be one of {', '.join(AUTH_MODES)} (got {self.auth!r})"
+            )
+        if self.auth == "client_secret":
+            self.tenant_id     = tenant_id     or _require_env("SENTINEL_TENANT_ID")
+            self.client_id     = client_id     or _require_env("SENTINEL_CLIENT_ID")
+            self.client_secret = client_secret or _require_env("SENTINEL_CLIENT_SECRET")
 
     # ── authentication ────────────────────────────────────────────────────────
 
     def get_token(self) -> str:
         """
-        Return a valid bearer token, refreshing from Azure AD if expired.
-        Tokens are cached in-memory to avoid unnecessary round-trips.
+        Return a valid bearer token, fetching a new one if the cached token
+        expires within 60 seconds.
         """
-        now = time.time()
-        if _token_cache["token"] and now < _token_cache["expires_at"] - 60:
-            return _token_cache["token"]
+        cached = _token_cache.get(self.auth)
+        if cached and time.time() < cached["expires_at"] - 60:
+            return cached["token"]
 
-        url = TOKEN_URL_TEMPLATE.format(tenant_id=self.tenant_id)
-        payload = {
-            "grant_type":    "client_credentials",
-            "client_id":     self.client_id,
-            "client_secret": self.client_secret,
-            "scope":         RESOURCE_SCOPE,
-        }
+        fetch = {
+            "managed_identity": self._token_from_managed_identity,
+            "azure_cli":        self._token_from_azure_cli,
+            "client_secret":    self._token_from_client_secret,
+        }[self.auth]
+        token, expires_at = fetch()
+        _token_cache[self.auth] = {"token": token, "expires_at": expires_at}
+        return token
 
-        resp = requests.post(url, data=payload, timeout=15)
+    def _token_from_client_secret(self) -> tuple[str, float]:
+        resp = requests.post(
+            TOKEN_URL_TEMPLATE.format(tenant_id=self.tenant_id),
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     self.client_id,
+                "client_secret": self.client_secret,
+                "scope":         RESOURCE_SCOPE,
+            },
+            timeout=15,
+        )
         if resp.status_code != 200:
             raise SentinelClientError(
                 f"Token request failed: {resp.status_code} — {resp.text[:300]}"
             )
-
         data = resp.json()
-        _token_cache["token"]      = data["access_token"]
-        _token_cache["expires_at"] = now + int(data.get("expires_in", 3600))
-        return _token_cache["token"]
+        return data["access_token"], time.time() + int(data.get("expires_in", 3600))
+
+    def _token_from_managed_identity(self) -> tuple[str, float]:
+        # IMDS is link-local: never route it through an HTTP proxy.
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            resp = session.get(
+                IMDS_TOKEN_URL,
+                params={"api-version": "2018-02-01", "resource": LOG_ANALYTICS_RESOURCE},
+                headers={"Metadata": "true"},
+                timeout=5,
+            )
+        except requests.RequestException as exc:
+            raise SentinelClientError(
+                f"Managed identity endpoint unreachable ({exc}). "
+                "managed_identity only works on an Azure VM with an identity assigned."
+            ) from exc
+        if resp.status_code != 200:
+            raise SentinelClientError(
+                f"Managed identity token request failed: {resp.status_code} — {resp.text[:300]}"
+            )
+        data = resp.json()
+        return data["access_token"], time.time() + int(data.get("expires_in", 3600))
+
+    def _token_from_azure_cli(self) -> tuple[str, float]:
+        az = shutil.which("az")
+        if not az:
+            raise SentinelClientError("azure_cli auth selected but the 'az' CLI is not on PATH")
+        proc = subprocess.run(
+            [az, "account", "get-access-token",
+             "--resource", LOG_ANALYTICS_RESOURCE, "--output", "json"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            raise SentinelClientError(
+                f"az account get-access-token failed (run 'az login'?): {proc.stderr.strip()[:300]}"
+            )
+        data = json.loads(proc.stdout)
+        # Newer CLI versions return expires_on as epoch seconds; fall back to
+        # a conservative 5 minutes if it is missing.
+        expires_at = float(data.get("expires_on") or time.time() + 300)
+        return data["accessToken"], expires_at
 
     # ── query ─────────────────────────────────────────────────────────────────
 
@@ -126,7 +194,7 @@ class SentinelClient:
 
         if resp.status_code == 401:
             # Token may have expired mid-run; invalidate cache and retry once
-            _token_cache["token"] = None
+            _token_cache.pop(self.auth, None)
             headers["Authorization"] = f"Bearer {self.get_token()}"
             resp = requests.post(url, headers=headers, json=body, timeout=30)
 
@@ -275,9 +343,9 @@ SecurityIncident
 
 TECHNIQUE_EVENT_HINTS: dict[str, dict] = {
     # Execution
-    "T1059.001": {"table": "SecurityEvent",  "event_ids": [4688, 4104]},  # PowerShell
+    "T1059.001": {"table": "SecurityEvent",  "event_ids": [4688]},        # powershell.exe process creation
     "T1059.003": {"table": "SecurityEvent",  "event_ids": [4688]},        # cmd.exe
-    "T1569.002": {"table": "SecurityEvent",  "event_ids": [4697, 7045]},  # Service install
+    "T1569.002": {"table": "SecurityEvent",  "event_ids": [4697]},        # Service install (7045 is in the System log -> Event table)
 
     # Persistence
     "T1547.001": {"table": "Event",          "event_ids": [13, 14]},      # Sysmon reg events (Event table)
@@ -285,7 +353,7 @@ TECHNIQUE_EVENT_HINTS: dict[str, dict] = {
     "T1136.001": {"table": "SecurityEvent",  "event_ids": [4720]},        # Account created
 
     # Credential Access
-    "T1003.001": {"table": "SecurityEvent",  "event_ids": [4656]},        # LSASS handle request (SecurityEvent only; Sysmon ID 10 queried separately in KQL)
+    "T1003.001": {"table": "Event",          "event_ids": [10]},          # Sysmon ProcessAccess on lsass (4656 needs a SACL the lab does not set)
     "T1110.001": {"table": "SecurityEvent",  "event_ids": [4625, 4771]},  # Failed logons
     "T1552.001": {"table": "SecurityEvent",  "event_ids": [4663, 4688]},  # File access
     "T1555.003": {"table": "SecurityEvent",  "event_ids": [4688]},        # Browser proc
@@ -300,6 +368,16 @@ TECHNIQUE_EVENT_HINTS: dict[str, dict] = {
 
 
 # ── internal helpers ───────────────────────────────────────────────────────────
+
+def _default_auth_mode() -> str:
+    if all(os.environ.get(v) for v in
+           ("SENTINEL_TENANT_ID", "SENTINEL_CLIENT_ID", "SENTINEL_CLIENT_SECRET")):
+        return "client_secret"
+    raise SentinelClientError(
+        "Set SENTINEL_AUTH to managed_identity, azure_cli or client_secret "
+        "(see .env.example)."
+    )
+
 
 def _require_env(name: str) -> str:
     val = os.environ.get(name)

@@ -37,3 +37,13 @@ Thumbs.db
 # Dashboard
 dashboard/node_modules/
 dashboard/dist/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+crash.log

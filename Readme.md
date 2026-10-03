@@ -210,25 +210,20 @@ All generated rules include inline comments explaining the detection logic and a
 
 ## Setup
 
+The recommended path is the Terraform lab in [`infra/`](infra/README.md): one `terraform apply` builds the workspace, Sentinel, a monitored Windows VM with Sysmon and Atomic Red Team, and cost guardrails. SentinelBench on that VM authenticates with the VM's managed identity, so no client secret is needed. The manual setup below still works.
+
 ### Prerequisites
 
 - Windows 10/11 VM (isolated, no production network connectivity)
 - Microsoft Sentinel workspace with Log Analytics
-- Azure AD App Registration with **Log Analytics Reader** role
+- An identity with the **Log Analytics Reader** role on the workspace (the VM managed identity, your own account via Azure CLI, or an app registration)
 - [Atomic Red Team](https://github.com/redcanaryco/atomic-red-team) installed on the lab VM
 - Python 3.10+
 - Node 18+ (for the dashboard)
 
 ### Environment Variables
 
-```bash
-SENTINEL_WORKSPACE_ID=your-workspace-id
-SENTINEL_CLIENT_ID=your-app-registration-client-id
-SENTINEL_CLIENT_SECRET=your-client-secret
-SENTINEL_TENANT_ID=your-tenant-id
-POLL_INTERVAL_MINUTES=2
-MAX_WAIT_MINUTES=15
-```
+See [`.env.example`](.env.example). `SENTINEL_AUTH` selects `managed_identity` (lab VM), `azure_cli` (your `az login` session) or `client_secret` (app registration).
 
 ### Install & Run
 
