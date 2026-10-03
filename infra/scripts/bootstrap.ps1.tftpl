@@ -11,10 +11,10 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'   # Invoke-WebRequest is very slow with the progress bar
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Root = 'C:\SentinelBench'
-$Downloads = Join-Path $Root 'downloads'
-New-Item -ItemType Directory -Force -Path $Root, $Downloads | Out-Null
-Start-Transcript -Path (Join-Path $Root 'bootstrap.log') -Append | Out-Null
+$SbRoot = 'C:\SentinelBench'
+$Downloads = Join-Path $SbRoot 'downloads'
+New-Item -ItemType Directory -Force -Path $SbRoot, $Downloads | Out-Null
+Start-Transcript -Path (Join-Path $SbRoot 'bootstrap.log') -Append | Out-Null
 
 function Step($message) { Write-Host "`n=== $message ===" }
 
@@ -65,7 +65,7 @@ Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Scr
 # ── 2. Sysmon ────────────────────────────────────────────────────────────────
 Step 'Sysmon'
 $sysmonZip = Get-File 'https://download.sysinternals.com/files/Sysmon.zip' 'Sysmon.zip'
-$sysmonDir = Join-Path $Root 'sysmon'
+$sysmonDir = Join-Path $SbRoot 'sysmon'
 Expand-Archive -Path $sysmonZip -DestinationPath $sysmonDir -Force
 $sysmonExe = Join-Path $sysmonDir 'Sysmon64.exe'
 Assert-Signed $sysmonExe 'Microsoft Corporation'
@@ -123,8 +123,19 @@ Remove-Item -Recurse -Force (Join-Path $artRoot 'atomics') -ErrorAction Silently
 Move-Item (Join-Path $atomicsTmp 'atomic-red-team-${art_atomics_commit}\atomics') (Join-Path $artRoot 'atomics')
 Remove-Item -Recurse -Force $atomicsTmp, $atomicsZip
 
-Import-Module (Join-Path $artRoot 'invoke-atomicredteam\Invoke-AtomicRedTeam.psd1') -Force
-Write-Host "Invoke-AtomicTest available: $([bool](Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue))"
+# The ART module manifest runs Public\config.ps1 via ScriptsToProcess, which
+# executes in the *importing* scope and defines $root, $artConfig and others.
+# Import in a child scope so none of it leaks into this script: it once
+# silently overwrote this script's root folder variable.
+$artModule = Join-Path $artRoot 'invoke-atomicredteam\Invoke-AtomicRedTeam.psd1'
+$artAvailable = & {
+    param($module)
+    Import-Module $module -Force
+    [bool](Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue)
+} $artModule
+Write-Host "Invoke-AtomicTest available: $artAvailable"
+if (-not $artAvailable) { throw 'Invoke-AtomicTest is not available after installing ART' }
+if ($SbRoot -ne 'C:\SentinelBench') { throw "Script root variable was overwritten: $SbRoot" }
 
 # ── 4. Python + SentinelBench ────────────────────────────────────────────────
 Step 'Python'
@@ -139,7 +150,7 @@ if (-not (Test-Path $pythonExe)) {
 }
 
 Step 'SentinelBench'
-$appDir = Join-Path $Root 'app'
+$appDir = Join-Path $SbRoot 'app'
 $sbInstalled = $false
 try {
     $sbZip = Get-File 'https://github.com/${sentinelbench_repo}/archive/${sentinelbench_ref}.zip' 'sentinelbench.zip'
@@ -149,14 +160,14 @@ try {
     # Keep the local database across re-runs of this script.
     $dbBackup = $null
     if (Test-Path (Join-Path $appDir 'sentinelbench.db')) {
-        $dbBackup = Join-Path $Root 'sentinelbench.db.bak'
+        $dbBackup = Join-Path $SbRoot 'sentinelbench.db.bak'
         Copy-Item (Join-Path $appDir 'sentinelbench.db') $dbBackup -Force
     }
     Remove-Item -Recurse -Force $appDir -ErrorAction SilentlyContinue
     Move-Item (Get-ChildItem $sbTmp -Directory | Select-Object -First 1).FullName $appDir
     if ($dbBackup) { Copy-Item $dbBackup (Join-Path $appDir 'sentinelbench.db') -Force }
 
-    & $pythonExe -m pip install --disable-pip-version-check -q -r (Join-Path $appDir 'requirements.txt')
+    & $pythonExe -m pip install --disable-pip-version-check --no-warn-script-location -q -r (Join-Path $appDir 'requirements.txt')
     if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
     @"
@@ -195,8 +206,8 @@ $auditPolicy = (& auditpol.exe /get /category:* /r | ConvertFrom-Csv |
     sentinelbench_ref     = '${sentinelbench_ref}'
     sentinelbench_ready   = $sbInstalled
     audit_policy          = $auditPolicy
-} | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $Root 'provenance.json') -Encoding UTF8
+} | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $SbRoot 'provenance.json') -Encoding UTF8
 
-Write-Host "`nBootstrap complete. See $Root\provenance.json"
+Write-Host "`nBootstrap complete. See $SbRoot\provenance.json"
 Stop-Transcript | Out-Null
 exit 0
