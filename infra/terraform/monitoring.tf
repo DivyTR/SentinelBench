@@ -22,8 +22,55 @@ resource "azurerm_virtual_machine_extension" "ama" {
   tags                       = var.tags
 }
 
-resource "azurerm_monitor_data_collection_rule" "lab" {
-  name                = "dcr-${local.name}-windows"
+# Two rules on purpose. The Microsoft-SecurityEvent stream is rejected
+# ("Data collection rule is invalid") unless the workspace has Sentinel (or
+# Defender for Cloud) enabled, so the Security-log rule only exists when
+# enable_sentinel is true. The Event rule works on a plain workspace and is
+# enough to prove the pipeline before the Sentinel trial clock starts.
+
+resource "azurerm_monitor_data_collection_rule" "events" {
+  name                = "dcr-${local.name}-events"
+  location            = azurerm_resource_group.lab.location
+  resource_group_name = azurerm_resource_group.lab.name
+  kind                = "Windows"
+  tags                = var.tags
+
+  destinations {
+    log_analytics {
+      name                  = "lab-workspace"
+      workspace_resource_id = azurerm_log_analytics_workspace.lab.id
+    }
+  }
+
+  data_sources {
+    windows_event_log {
+      name    = "sysmon-and-friends"
+      streams = ["Microsoft-Event"]
+      x_path_queries = [
+        "Microsoft-Windows-Sysmon/Operational!*",
+        "Microsoft-Windows-PowerShell/Operational!*[System[(EventID=4103 or EventID=4104)]]",
+        "System!*[System[(EventID=104 or EventID=7036 or EventID=7040 or EventID=7045)]]",
+        "Microsoft-Windows-Windows Defender/Operational!*",
+        "Microsoft-Windows-TaskScheduler/Operational!*[System[(EventID=106 or EventID=140 or EventID=141)]]",
+      ]
+    }
+  }
+
+  data_flow {
+    streams      = ["Microsoft-Event"]
+    destinations = ["lab-workspace"]
+  }
+}
+
+resource "azurerm_monitor_data_collection_rule_association" "events" {
+  name                    = "dcra-${local.name}-events"
+  target_resource_id      = azurerm_windows_virtual_machine.lab.id
+  data_collection_rule_id = azurerm_monitor_data_collection_rule.events.id
+}
+
+resource "azurerm_monitor_data_collection_rule" "security" {
+  count               = var.enable_sentinel ? 1 : 0
+  name                = "dcr-${local.name}-security"
   location            = azurerm_resource_group.lab.location
   resource_group_name = azurerm_resource_group.lab.name
   kind                = "Windows"
@@ -42,18 +89,6 @@ resource "azurerm_monitor_data_collection_rule" "lab" {
       streams        = ["Microsoft-SecurityEvent"]
       x_path_queries = ["Security!*"]
     }
-
-    windows_event_log {
-      name    = "sysmon-and-friends"
-      streams = ["Microsoft-Event"]
-      x_path_queries = [
-        "Microsoft-Windows-Sysmon/Operational!*",
-        "Microsoft-Windows-PowerShell/Operational!*[System[(EventID=4103 or EventID=4104)]]",
-        "System!*[System[(EventID=104 or EventID=7036 or EventID=7040 or EventID=7045)]]",
-        "Microsoft-Windows-Windows Defender/Operational!*",
-        "Microsoft-Windows-TaskScheduler/Operational!*[System[(EventID=106 or EventID=140 or EventID=141)]]",
-      ]
-    }
   }
 
   data_flow {
@@ -61,14 +96,12 @@ resource "azurerm_monitor_data_collection_rule" "lab" {
     destinations = ["lab-workspace"]
   }
 
-  data_flow {
-    streams      = ["Microsoft-Event"]
-    destinations = ["lab-workspace"]
-  }
+  depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.lab]
 }
 
-resource "azurerm_monitor_data_collection_rule_association" "lab" {
-  name                    = "dcra-${local.name}-windows"
+resource "azurerm_monitor_data_collection_rule_association" "security" {
+  count                   = var.enable_sentinel ? 1 : 0
+  name                    = "dcra-${local.name}-security"
   target_resource_id      = azurerm_windows_virtual_machine.lab.id
-  data_collection_rule_id = azurerm_monitor_data_collection_rule.lab.id
+  data_collection_rule_id = azurerm_monitor_data_collection_rule.security[0].id
 }

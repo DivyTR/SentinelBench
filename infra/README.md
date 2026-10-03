@@ -7,7 +7,7 @@ Terraform that builds the complete lab in one Azure resource group:
 | Log Analytics workspace | PerGB2018, 30-day retention, **daily ingestion cap** (default 1 GB) |
 | Microsoft Sentinel | Onboarded only when `enable_sentinel = true` |
 | Windows Server 2022 VM | `Standard_B2s`, system-assigned managed identity, RDP allowed **only from your IP**, auto-shutdown every night |
-| Azure Monitor Agent + DCR | Security log → `SecurityEvent`; Sysmon, PowerShell 4104, selected System events, Defender and Task Scheduler logs → `Event` |
+| Azure Monitor Agent + DCRs | Sysmon, PowerShell 4104, selected System events, Defender and Task Scheduler logs → `Event`; Security log → `SecurityEvent` (once Sentinel is enabled) |
 | Bootstrap | Audit policy, Sysmon (pinned config, SHA-256 verified), Atomic Red Team (pinned commits), Python, SentinelBench with managed-identity auth |
 | Budget | Monthly budget on the resource group with email alerts at 50/80/100% and forecast 100% |
 
@@ -56,10 +56,10 @@ SecurityEvent | summarize count() by EventID
 Usage | where TimeGenerated > ago(1d) | summarize MB = sum(Quantity) by DataType | order by MB desc
 ```
 
-I am not certain whether the workspace accepts `SecurityEvent` data before
-Sentinel (or Defender for Cloud) is enabled on it. If `Heartbeat` and `Event` have
-data but `SecurityEvent` is empty, that is the likely reason. Enable Sentinel
-(step 3) and check again before debugging further.
+`SecurityEvent` stays **empty until step 3**. Azure rejects a data collection
+rule for the Security log on a workspace without Sentinel (or Defender for
+Cloud), so that rule is only created when `enable_sentinel = true`. At this
+stage, `Heartbeat` and `Event` having data is the success criterion.
 
 ## 3. Enable Sentinel
 

@@ -44,6 +44,6 @@ resource "azurerm_virtual_machine_run_command" "bootstrap" {
   # is already flowing.
   depends_on = [
     azurerm_virtual_machine_extension.ama,
-    azurerm_monitor_data_collection_rule_association.lab,
+    azurerm_monitor_data_collection_rule_association.events,
   ]
 }
