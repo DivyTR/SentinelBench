@@ -19,10 +19,10 @@ The App Registration in Azure AD needs the following API permission:
 and must be granted admin consent.
 """
 
-import json
 import os
+import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
@@ -141,54 +141,79 @@ class SentinelClient:
 
     def check_alert_for_technique(
         self,
-        technique_id: str,
+        match_ids: list[str],
         since: datetime,
-        window_minutes: int = 15,
+        until: datetime,
+        host: Optional[str] = None,
     ) -> Optional[dict]:
         """
-        Look for a Sentinel SecurityAlert or SecurityIncident linked to
-        the given ATT&CK technique ID, created after `since`.
-
-        Returns the first matching alert row as a dict, or None if not found.
+        Return the earliest Sentinel alert created in [since, until] that is
+        tagged with one of `match_ids`, or None.
 
         How matching works
         ------------------
-        Sentinel's built-in analytics rules tag alerts with ATT&CK technique IDs
-        in the ExtendedProperties or Tactics/Techniques fields.
-        We query SecurityAlert first (Fusion + built-in rules write here),
-        then fall back to SecurityIncident.
+        SecurityAlert has a `Techniques` column (JSON array of ATT&CK IDs);
+        some providers only put the IDs in ExtendedProperties.  We extract
+        every ATT&CK ID from both with a regex and require an EXACT match
+        against match_ids.  A plain `has "T1059"` would also match alerts
+        tagged T1059.003 and credit them to the wrong technique.
+
+        If `host` is given, the alert must name it in CompromisedEntity or
+        Entities, so alerts from other machines in the workspace are ignored.
+
+        SecurityAlert receives a new row each time an alert's status changes;
+        arg_min per SystemAlertId keeps the row from when it was first created.
+        Falls back to SecurityIncident when no alert row matches.
         """
-        since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        ids = _kql_dynamic_list(match_ids)
+        since_str, until_str = _kql_datetime(since), _kql_datetime(until)
+        host_filter = ""
+        if host:
+            h = _validate_host(host)
+            host_filter = (
+                f'| where CompromisedEntity has "{h}" or tostring(Entities) has "{h}"\n'
+            )
+
         kql = f"""
 SecurityAlert
-| where TimeGenerated >= datetime({since_str})
-| where ExtendedProperties has "{technique_id}"
-      or Tactics has "{technique_id}"
-| project TimeGenerated, AlertName, AlertSeverity, ExtendedProperties, Tactics
+| where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| extend IngestedAt = ingestion_time()
+| extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)",
+                                 strcat(tostring(Techniques), " ", tostring(ExtendedProperties)))
+| extend MatchedIds = set_intersect(AttackIds, {ids})
+| where array_length(MatchedIds) > 0
+{host_filter}| summarize arg_min(TimeGenerated, *) by SystemAlertId
+| project TimeGenerated, IngestedAt, StartTime, AlertName, AlertSeverity,
+          ProviderName, CompromisedEntity, MatchedIds, SystemAlertId
 | order by TimeGenerated asc
 | take 1
 """
-        rows = self.query(kql, timespan=f"PT{window_minutes}M")
+        timespan = f"{since_str}/{until_str}"
+        rows = self.query(kql, timespan=timespan)
         if rows:
-            return rows[0]
+            return {**rows[0], "SourceTable": "SecurityAlert"}
 
         # Fallback: SecurityIncident (aggregated alerts → incidents)
         kql_incident = f"""
 SecurityIncident
-| where CreatedTime >= datetime({since_str})
-| where AdditionalData has "{technique_id}"
-| project CreatedTime, Title, Severity, AdditionalData
+| where CreatedTime between (datetime({since_str}) .. datetime({until_str}))
+| extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)", tostring(AdditionalData))
+| extend MatchedIds = set_intersect(AttackIds, {ids})
+| where array_length(MatchedIds) > 0
+| summarize arg_min(CreatedTime, *) by IncidentNumber
+| project CreatedTime, Title, Severity, ProviderName, MatchedIds, IncidentNumber
 | order by CreatedTime asc
 | take 1
 """
-        rows = self.query(kql_incident, timespan=f"PT{window_minutes}M")
-        return rows[0] if rows else None
+        rows = self.query(kql_incident, timespan=timespan)
+        return {**rows[0], "SourceTable": "SecurityIncident"} if rows else None
 
     def fetch_raw_logs(
         self,
         technique_id: str,
         exec_time: datetime,
         window_minutes: int = 5,
+        host: Optional[str] = None,
     ) -> list[dict]:
         """
         Pull the raw Windows Security Event / Sysmon logs generated during
@@ -197,22 +222,24 @@ SecurityIncident
 
         Uses technique-specific EventID hints defined in TECHNIQUE_EVENT_HINTS.
         """
-        since_str = exec_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        until_str = _add_minutes(exec_time, window_minutes).strftime("%Y-%m-%dT%H:%M:%SZ")
+        since_str = _kql_datetime(exec_time)
+        until_str = _kql_datetime(_add_minutes(exec_time, window_minutes))
 
         hints = TECHNIQUE_EVENT_HINTS.get(technique_id, {})
         event_ids = hints.get("event_ids", [4688])  # default: process creation
         table = hints.get("table", "SecurityEvent")
 
         event_id_filter = " or ".join(f"EventID == {e}" for e in event_ids)
+        host_filter = f'| where Computer startswith "{_validate_host(host)}"\n' if host else ""
 
         if table == "Event":
             # Sysmon events — structured fields are inside EventData XML
             kql = f"""
 {table}
 | where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| where Source == "Microsoft-Windows-Sysmon"
 | where {event_id_filter}
-| extend EventDataParsed = parse_xml(EventData)
+{host_filter}| extend EventDataParsed = parse_xml(EventData)
 | project TimeGenerated, EventID, Computer,
           Process       = tostring(EventDataParsed.DataItem.Image),
           CommandLine   = tostring(EventDataParsed.DataItem.CommandLine),
@@ -226,19 +253,19 @@ SecurityIncident
 {table}
 | where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
 | where {event_id_filter}
-| project TimeGenerated, EventID, Computer, Account, Process, CommandLine,
+{host_filter}| project TimeGenerated, EventID, Computer, Account, Process, CommandLine,
           ParentProcessName, SubjectUserName, TargetUserName
 | order by TimeGenerated asc
 | take 20
 """
-        return self.query(kql, timespan=f"PT{window_minutes + 2}M")
+        return self.query(kql, timespan=f"{since_str}/{until_str}")
 
     def test_connection(self) -> bool:
         """
         Verify credentials and workspace connectivity.
         Returns True on success, raises SentinelClientError on failure.
         """
-        rows = self.query("Heartbeat | take 1", timespan="PT5M")
+        self.query("Heartbeat | take 1", timespan="PT5M")
         return True  # if query() didn't raise, we're connected
 
 
@@ -265,8 +292,8 @@ TECHNIQUE_EVENT_HINTS: dict[str, dict] = {
     "T1040":     {"table": "SecurityEvent",  "event_ids": [4688]},        # Network sniffer
 
     # Defense Evasion
-    "T1070.001": {"table": "SecurityEvent",  "event_ids": [1102, 104]},   # Log cleared
-    "T1562.001": {"table": "SecurityEvent",  "event_ids": [4688, 7036]},  # Service stopped
+    "T1070.001": {"table": "SecurityEvent",  "event_ids": [1102]},        # Security log cleared
+    "T1562.001": {"table": "SecurityEvent",  "event_ids": [4688]},        # sc.exe stop WinDefend
     "T1027":     {"table": "SecurityEvent",  "event_ids": [4688]},        # Obfuscated exec
     "T1112":     {"table": "Event",          "event_ids": [13, 14]},      # Sysmon reg modification (Event table)
 }
@@ -303,5 +330,30 @@ def _parse_response(data: dict) -> list[dict]:
 
 
 def _add_minutes(dt: datetime, minutes: int) -> datetime:
-    from datetime import timedelta
     return dt + timedelta(minutes=minutes)
+
+
+_ATTACK_ID_RE = re.compile(r"^T\d{4}(\.\d{3})?$")
+_HOST_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
+
+
+def _kql_datetime(dt: datetime) -> str:
+    """Format a datetime as a UTC literal for KQL datetime() and API timespans."""
+    if dt.tzinfo is None:
+        raise ValueError("datetimes passed to KQL must be timezone-aware")
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _kql_dynamic_list(attack_ids: list[str]) -> str:
+    """Render ATT&CK IDs as a KQL dynamic array, rejecting anything malformed."""
+    for t in attack_ids:
+        if not _ATTACK_ID_RE.match(t):
+            raise ValueError(f"Not an ATT&CK technique ID: {t!r}")
+    return "dynamic([" + ", ".join(f'"{t}"' for t in attack_ids) + "])"
+
+
+def _validate_host(host: str) -> str:
+    """Hostnames are interpolated into KQL, so only allow hostname characters."""
+    if not _HOST_RE.match(host):
+        raise ValueError(f"Invalid hostname for KQL filter: {host!r}")
+    return host

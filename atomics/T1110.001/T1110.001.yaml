@@ -1,0 +1,45 @@
+# SentinelBench custom atomic, in Atomic Red Team format.
+#
+# Why this exists: every upstream ART Windows test for T1110.001 targets
+# Active Directory (SMB/LDAP against a domain, or Kerbrute).  The v1 lab is
+# a single standalone VM, so this test guesses passwords against a local
+# account over loopback SMB instead.  It produces the same host telemetry
+# a failed-logon brute-force rule keys on: Security event 4625, logon type 3.
+#
+# Requires the "Logon" audit subcategory to log failures
+# (auditpol /set /subcategory:"Logon" /failure:enable), which the lab
+# provisioning enables.  If the VM has an account lockout threshold, the
+# target account will lock part-way through (event 4740) — expected.
+attack_technique: T1110.001
+display_name: 'Brute Force: Password Guessing'
+atomic_tests:
+- name: Local account password guessing over loopback SMB (SentinelBench)
+  auto_generated_guid: 2a0a08a4-1f45-4089-984d-656e7764f699
+  description: |
+    Creates a local account with a random password, then attempts
+    #{attempts} SMB logons to \\127.0.0.1\IPC$ as that account with wrong
+    passwords. Cleanup deletes the account.
+  supported_platforms:
+  - windows
+  input_arguments:
+    username:
+      description: Local account to create and target
+      type: string
+      default: sb_brute_target
+    attempts:
+      description: Number of wrong-password logon attempts
+      type: integer
+      default: 20
+  executor:
+    name: powershell
+    elevation_required: true
+    command: |
+      $real = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object {[char]$_}) + '!a1'
+      net user #{username} $real /add | Out-Null
+      foreach ($i in 1..#{attempts}) {
+        net use \\127.0.0.1\IPC$ /user:"$env:COMPUTERNAME\#{username}" "WrongGuess$i!" 2>&1 | Out-Null
+        net use \\127.0.0.1\IPC$ /delete /y 2>&1 | Out-Null
+      }
+      Write-Host "Made #{attempts} failed logon attempts as #{username}"
+    cleanup_command: |
+      net user #{username} /delete 2>&1 | Out-Null

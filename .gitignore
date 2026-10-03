@@ -33,3 +33,7 @@ pip-wheel-metadata/
 # OS
 .DS_Store
 Thumbs.db
+
+# Dashboard
+dashboard/node_modules/
+dashboard/dist/

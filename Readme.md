@@ -30,9 +30,9 @@ SentinelBench executes safe, lab-isolated attack simulations drawn from Atomic R
 |--------|-------------|
 | **Caught / Missed** | Did Sentinel fire any alert for this technique? |
 | **Detection Latency** | How many seconds elapsed between technique execution and alert creation? |
-| **Severity Accuracy** | Does the assigned severity match the ATT&CK-defined impact level of the technique? |
+| **Severity Accuracy** | Does the assigned severity match the expected severity SentinelBench assigns to the technique? |
 
-For every missed detection, SentinelBench generates a KQL (Kusto Query Language) detection rule seeded with the actual event data from the simulation run — not a generic template, but a rule that would have caught this specific execution on your specific log source configuration.
+For every missed detection, SentinelBench generates a candidate KQL (Kusto Query Language) detection rule. Today most rules are per-technique templates; seeding them with the event data observed during the run is in progress (see Roadmap).
 
 The results are visualised as an ATT&CK heatmap where colour encodes latency (not just binary pass/fail), giving a security team a continuous quality score rather than a compliance checkbox.
 
@@ -125,6 +125,12 @@ Both scenarios score as "detected" on a coverage report. Only one reflects a sec
 
 SentinelBench v1 covers **15 techniques** across four tactics chosen for high prevalence in real incident investigations and high variance in Sentinel's default detection coverage.
 
+Each technique is pinned to **one specific Atomic Red Team test by GUID** (`art_guid` in `core/simulation_runner.py`), so every run executes exactly the same procedure. Test numbers are not used: they shift between ART releases, and test #1 is often a Linux or macOS test that Invoke-AtomicTest silently skips on Windows. SentinelBench also checks ART's output to confirm a test actually executed, rather than trusting the exit code.
+
+Two notes on IDs:
+- In its ATT&CK v19 migration, upstream ART moved *Clear Windows Event Logs* to `T1685.005` and *Disable or Modify Tools* to `T1685`. SentinelBench keeps the familiar IDs as its keys, runs the tests from ART's new folders, and accepts alerts tagged with either the old or the new ID.
+- Every upstream Windows test for T1110.001 needs Active Directory, so v1 uses a custom atomic in [`atomics/T1110.001`](atomics/T1110.001/T1110.001.yaml) that guesses passwords against a local account.
+
 ### Execution — 3 techniques
 
 | ATT&CK ID | Technique | Why included |
@@ -146,7 +152,7 @@ SentinelBench v1 covers **15 techniques** across four tactics chosen for high pr
 | ATT&CK ID | Technique | Why included |
 |-----------|-----------|--------------|
 | T1003.001 | LSASS Memory | The highest-impact credential dumping technique; latency here has the most direct operational consequence |
-| T1110.001 | Brute Force — Password Guessing | Tests whether Sentinel's failed-login correlation is active and correctly thresholded |
+| T1110.001 | Brute Force — Password Guessing | Tests whether Sentinel's failed-login correlation is active and correctly thresholded (custom atomic, see above) |
 | T1552.001 | Credentials in Files | Tests file-access telemetry; frequently blind spot in Sentinel deployments without MDE integration |
 | T1555.003 | Credentials from Web Browsers | Low severity by default in most rule sets despite high attacker value; severity accuracy test |
 | T1040 | Network Sniffing | Tests whether network telemetry is flowing; often reveals gaps in log source configuration |
@@ -181,7 +187,7 @@ Latency thresholds used in the heatmap colour encoding:
 
 ### Severity Accuracy
 
-Each ATT&CK technique has a documented impact level based on MITRE's own data source characterisation and community-validated severity assignments. SentinelBench compares the severity Sentinel assigned to the triggered alert against the expected severity for that technique.
+MITRE ATT&CK does not assign severities to techniques. The expected severity for each technique (`severity_expected` in `core/simulation_runner.py`) is SentinelBench's own judgement, based on the technique's typical position in an intrusion and its impact if missed. SentinelBench compares the severity Sentinel assigned to the triggered alert against that expected value, so treat severity results as "does Sentinel agree with this rubric", not as ground truth.
 
 A **severity delta** of +1 or more (e.g., Sentinel fires *Low* for a technique with expected impact *High*) is flagged as a severity miscalibration and highlighted in the remediation panel alongside the KQL suggestion.
 
@@ -238,6 +244,18 @@ python sentinelbench.py --suite v1
 # Start the dashboard
 cd dashboard && npm install && npm run dev
 ```
+
+---
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest -q
+```
+
+The test suite runs without Azure or Windows: the Log Analytics client, PowerShell and the clock are replaced with fakes. CI runs lint, tests and a dashboard build on every push.
 
 ---
 

@@ -29,8 +29,6 @@ Confidence levels
                     specific adjustments before production deployment.
 """
 
-import json
-from typing import Optional
 
 
 # ── public interface ──────────────────────────────────────────────────────────
@@ -117,7 +115,6 @@ SecurityEvent
 
 def _gen_T1059_003(technique_id: str, raw_logs: list[dict]) -> dict:
     """Windows Command Shell detection."""
-    cmdline_hint = _extract_field(raw_logs, "CommandLine", default="")
     confidence = "medium"
 
     kql = f"""// T1059.003 — Windows Command Shell
@@ -378,7 +375,6 @@ def _generic_generator(technique_id: str, raw_logs: list[dict]) -> dict:
     Produces a process-creation rule seeded with observed process names.
     """
     process_hint = _extract_field(raw_logs, "Process", default="")
-    cmdline_hint = _extract_field(raw_logs, "CommandLine", default="")
 
     process_filter = (
         f'| where Process has "{process_hint}"'

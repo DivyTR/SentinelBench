@@ -23,7 +23,7 @@ We note this lag in all latency outputs so results are interpreted correctly.
 """
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .sentinel_client import SentinelClient
@@ -60,21 +60,34 @@ class MetricsEngine:
 
     Usage
     -----
-        engine = MetricsEngine(client)
+        engine = MetricsEngine(client, host="sb-lab-vm")
         measurement = engine.observe(
             technique_id="T1003.001",
+            match_ids=["T1003.001", "T1003"],
             severity_expected="High",
             exec_time=datetime.now(timezone.utc),
         )
     """
 
-    def __init__(self, client: SentinelClient, dry_run: bool = False):
+    def __init__(
+        self,
+        client: Optional[SentinelClient],
+        dry_run: bool = False,
+        host: Optional[str] = None,
+        clock=None,
+        sleep=time.sleep,
+    ):
         self.client  = client
         self.dry_run = dry_run
+        self.host    = host
+        # Injectable for tests; production uses the real clock and sleep.
+        self._clock  = clock or (lambda: datetime.now(timezone.utc))
+        self._sleep  = sleep
 
     def observe(
         self,
         technique_id: str,
+        match_ids: list[str],
         severity_expected: str,
         exec_time: datetime,
     ) -> dict:
@@ -82,45 +95,47 @@ class MetricsEngine:
         Poll Sentinel at each checkpoint until an alert is found or
         all checkpoints are exhausted.
 
+        Checkpoints are absolute offsets from exec_time (T+2min means
+        exec_time + 2 minutes), not from when observe() is called.
+
         Returns a measurement dict:
           caught             bool
-          latency_seconds    float | None
+          latency_seconds    float | None  (alert created - exec_time)
           latency_band       str ('green'|'amber'|'red'|'missed')
           severity_assigned  str | None
           severity_expected  str
-          severity_delta     int | None  (positive = under-rated)
+          severity_delta     int | None  (positive = under-rated; None if
+                                          severity is missing or unrecognised)
           poll_checkpoint    str | None  (e.g. 'T+5min')
+          timestamp_alert    str | None  (ISO; when the alert was created)
           alert_row          dict | None (raw Sentinel row)
           raw_logs           list[dict]  (event logs for KQL seeding)
         """
         if self.dry_run:
             return _dry_run_measurement(technique_id, severity_expected)
 
-        previous_checkpoint_elapsed = 0
-
         for checkpoint_minutes in POLL_CHECKPOINTS_MINUTES:
-            # Sleep only the delta since we last checked
-            sleep_seconds = (checkpoint_minutes * 60) - previous_checkpoint_elapsed
+            checkpoint_at = exec_time + timedelta(minutes=checkpoint_minutes)
+            sleep_seconds = (checkpoint_at - self._clock()).total_seconds()
             if sleep_seconds > 0:
                 print(
-                    f"    [obs] Waiting {sleep_seconds}s "
+                    f"    [obs] Waiting {sleep_seconds:.0f}s "
                     f"(checkpoint T+{checkpoint_minutes}min) ..."
                 )
-                time.sleep(sleep_seconds)
-
-            previous_checkpoint_elapsed = checkpoint_minutes * 60
+                self._sleep(sleep_seconds)
 
             alert_row = self.client.check_alert_for_technique(
-                technique_id=technique_id,
+                match_ids=match_ids,
                 since=exec_time,
-                window_minutes=checkpoint_minutes + 2,  # slight overlap for safety
+                until=self._clock(),
+                host=self.host,
             )
 
             if alert_row:
                 alert_time     = _parse_alert_time(alert_row)
                 latency        = _calc_latency(exec_time, alert_time)
                 sev_assigned   = _extract_severity(alert_row)
-                sev_delta      = _severity_delta(sev_assigned, severity_expected)
+                sev_delta      = severity_delta(sev_assigned, severity_expected)
                 checkpoint_label = f"T+{checkpoint_minutes}min"
 
                 print(
@@ -131,7 +146,7 @@ class MetricsEngine:
 
                 # Fetch raw logs for KQL seeding (best-effort)
                 raw_logs = _safe_fetch_logs(
-                    self.client, technique_id, exec_time
+                    self.client, technique_id, exec_time, self.host
                 )
 
                 return {
@@ -142,6 +157,7 @@ class MetricsEngine:
                     "severity_expected": severity_expected,
                     "severity_delta":    sev_delta,
                     "poll_checkpoint":   checkpoint_label,
+                    "timestamp_alert":   alert_time.isoformat(),
                     "alert_row":         alert_row,
                     "raw_logs":          raw_logs,
                 }
@@ -149,7 +165,7 @@ class MetricsEngine:
         # All checkpoints exhausted — missed detection
         print(f"    [obs] MISSED — no alert found within {POLL_CHECKPOINTS_MINUTES[-1]} minutes")
 
-        raw_logs = _safe_fetch_logs(self.client, technique_id, exec_time)
+        raw_logs = _safe_fetch_logs(self.client, technique_id, exec_time, self.host)
 
         return {
             "caught":            False,
@@ -159,9 +175,34 @@ class MetricsEngine:
             "severity_expected": severity_expected,
             "severity_delta":    None,
             "poll_checkpoint":   None,
+            "timestamp_alert":   None,
             "alert_row":         None,
             "raw_logs":          raw_logs,
         }
+
+
+# ── severity ───────────────────────────────────────────────────────────────────
+
+_SEVERITY_RANK = {"informational": 0, "low": 1, "medium": 2, "high": 3}
+
+
+def severity_delta(assigned: Optional[str], expected: Optional[str]) -> Optional[int]:
+    """
+    expected - assigned, on the scale Informational(0) .. High(3).
+
+    Positive = Sentinel under-rated (bad).
+    Zero     = accurate.
+    Negative = Sentinel over-rated.
+    None     = either value is missing or not a recognised severity, so no
+               judgement can be made (never silently counted as accurate).
+    """
+    if not assigned or not expected:
+        return None
+    a = _SEVERITY_RANK.get(assigned.strip().lower())
+    e = _SEVERITY_RANK.get(expected.strip().lower())
+    if a is None or e is None:
+        return None
+    return e - a
 
 
 # ── internal helpers ───────────────────────────────────────────────────────────
@@ -170,13 +211,21 @@ def _parse_alert_time(alert_row: dict) -> datetime:
     """
     Extract the alert creation timestamp from a Sentinel row.
     Handles both SecurityAlert (TimeGenerated) and SecurityIncident (CreatedTime).
+
+    Raises ValueError rather than guessing: substituting "now" would record
+    a fabricated latency.
     """
-    raw = alert_row.get("TimeGenerated") or alert_row.get("CreatedTime") or ""
-    try:
-        # Azure returns ISO 8601 with Z suffix
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return datetime.now(timezone.utc)
+    raw = alert_row.get("TimeGenerated") or alert_row.get("CreatedTime")
+    if not raw:
+        raise ValueError(f"Alert row has no timestamp: {alert_row}")
+    # Azure returns ISO 8601 with a Z suffix and up to 7 fractional digits,
+    # which datetime.fromisoformat() rejects before Python 3.11.
+    raw = raw.replace("Z", "+00:00")
+    if "." in raw:
+        head, rest = raw.split(".", 1)
+        frac, tz = rest[:-6], rest[-6:]
+        raw = f"{head}.{frac[:6].ljust(6, '0')}{tz}"
+    return datetime.fromisoformat(raw)
 
 
 def _calc_latency(exec_time: datetime, alert_time: datetime) -> float:
@@ -185,36 +234,21 @@ def _calc_latency(exec_time: datetime, alert_time: datetime) -> float:
     return max(0.0, delta)
 
 
-def _extract_severity(alert_row: dict) -> str:
+def _extract_severity(alert_row: dict) -> Optional[str]:
     """Pull the severity string from an alert row, normalised to Title Case."""
-    raw = alert_row.get("AlertSeverity") or alert_row.get("Severity") or "Unknown"
-    return raw.strip().title()
-
-
-_SEVERITY_RANK = {"Informational": 0, "Low": 1, "Medium": 2, "High": 3}
-
-
-def _severity_delta(assigned: str, expected: str) -> int:
-    """
-    Positive = Sentinel under-rated (bad).
-    Zero     = accurate.
-    Negative = Sentinel over-rated.
-    """
-    a = _SEVERITY_RANK.get(assigned.title(), -1)
-    e = _SEVERITY_RANK.get(expected.title(), -1)
-    if a == -1 or e == -1:
-        return 0
-    return e - a
+    raw = alert_row.get("AlertSeverity") or alert_row.get("Severity")
+    return raw.strip().title() if raw else None
 
 
 def _safe_fetch_logs(
     client: SentinelClient,
     technique_id: str,
     exec_time: datetime,
+    host: Optional[str] = None,
 ) -> list[dict]:
     """Fetch raw event logs; return empty list on any failure."""
     try:
-        return client.fetch_raw_logs(technique_id, exec_time, window_minutes=5)
+        return client.fetch_raw_logs(technique_id, exec_time, window_minutes=5, host=host)
     except Exception as exc:
         print(f"    [obs] Warning: could not fetch raw logs — {exc}")
         return []
@@ -225,15 +259,17 @@ def _dry_run_measurement(technique_id: str, severity_expected: str) -> dict:
     import random
     simulated_caught = random.random() > 0.35  # ~65% detection rate for demo
     latency = round(random.uniform(30, 800), 1) if simulated_caught else None
+    sev_assigned = random.choice(["High", "Medium", "Low"]) if simulated_caught else None
 
     return {
         "caught":            simulated_caught,
         "latency_seconds":   latency,
         "latency_band":      latency_band(latency),
-        "severity_assigned": random.choice(["High", "Medium", "Low"]) if simulated_caught else None,
+        "severity_assigned": sev_assigned,
         "severity_expected": severity_expected,
-        "severity_delta":    random.choice([0, 0, 1, -1]) if simulated_caught else None,
+        "severity_delta":    severity_delta(sev_assigned, severity_expected),
         "poll_checkpoint":   random.choice(["T+2min", "T+5min", "T+10min"]) if simulated_caught else None,
+        "timestamp_alert":   None,
         "alert_row":         {"AlertName": "[dry-run alert]"} if simulated_caught else None,
         "raw_logs":          [{"EventID": 4688, "Process": "powershell.exe", "CommandLine": "[dry-run]"}],
     }

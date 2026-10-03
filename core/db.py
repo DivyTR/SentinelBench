@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .metrics_engine import severity_delta
+
 DB_PATH = Path(__file__).parent.parent / "sentinelbench.db"
 
 
@@ -43,7 +45,8 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at     TEXT,
     host            TEXT,                   -- hostname of the lab VM
     sentinel_workspace TEXT,               -- workspace ID used (not the secret)
-    notes           TEXT
+    notes           TEXT,
+    dry_run         INTEGER NOT NULL DEFAULT 0  -- 1 = synthetic results, not a real measurement
 );
 
 CREATE TABLE IF NOT EXISTS results (
@@ -60,7 +63,12 @@ CREATE TABLE IF NOT EXISTS results (
     severity_expected   TEXT NOT NULL,     -- ATT&CK-derived expected severity
     severity_delta      INTEGER,           -- positive = under-rated, negative = over-rated
     poll_checkpoint     TEXT,              -- which poll caught it: T+2, T+5, T+10, T+15
-    raw_log_sample      TEXT               -- JSON string of key log fields for KQL seeding
+    raw_log_sample      TEXT,              -- JSON string of key log fields for KQL seeding
+    art_guid            TEXT,              -- pinned ART test that was executed
+    alert_name          TEXT,              -- name of the matched alert/incident
+    alert_provider      TEXT,              -- e.g. 'ASI Scheduled Alerts', 'MDATP'
+    alert_matched_ids   TEXT,              -- JSON list of ATT&CK IDs that matched
+    timestamp_alert_ingested TEXT          -- ingestion_time() of the alert row
 );
 
 CREATE TABLE IF NOT EXISTS kql_suggestions (
@@ -80,11 +88,33 @@ CREATE INDEX IF NOT EXISTS idx_kql_result     ON kql_suggestions(result_id);
 """
 
 
-def init_db(path: Path = DB_PATH) -> None:
-    """Create tables and indexes if they don't exist."""
+# Columns added after the first release.  CREATE TABLE IF NOT EXISTS does not
+# alter an existing table, so databases created by older versions get them here.
+_MIGRATIONS = {
+    "runs": {
+        "dry_run": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "results": {
+        "art_guid":                 "TEXT",
+        "alert_name":               "TEXT",
+        "alert_provider":           "TEXT",
+        "alert_matched_ids":        "TEXT",
+        "timestamp_alert_ingested": "TEXT",
+    },
+}
+
+
+def init_db(path: Path = DB_PATH, verbose: bool = True) -> None:
+    """Create tables and indexes if they don't exist, and add missing columns."""
     with get_connection(path) as conn:
         conn.executescript(SCHEMA)
-    print(f"[db] Database ready at {path}")
+        for table, columns in _MIGRATIONS.items():
+            existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for name, decl in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    if verbose:
+        print(f"[db] Database ready at {path}")
 
 
 # ── run operations ─────────────────────────────────────────────────────────────
@@ -94,6 +124,7 @@ def create_run(
     host: str,
     sentinel_workspace: str,
     notes: str = "",
+    dry_run: bool = False,
     path: Path = DB_PATH,
 ) -> str:
     """Insert a new run row and return its run_id."""
@@ -102,10 +133,10 @@ def create_run(
     with get_connection(path) as conn:
         conn.execute(
             """
-            INSERT INTO runs (run_id, suite, started_at, host, sentinel_workspace, notes)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO runs (run_id, suite, started_at, host, sentinel_workspace, notes, dry_run)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, suite, started_at, host, sentinel_workspace, notes),
+            (run_id, suite, started_at, host, sentinel_workspace, notes, int(dry_run)),
         )
     return run_id
 
@@ -150,14 +181,16 @@ def save_result(
     severity_assigned: Optional[str] = None,
     poll_checkpoint: Optional[str] = None,
     raw_log_sample: Optional[str] = None,
+    art_guid: Optional[str] = None,
+    alert_name: Optional[str] = None,
+    alert_provider: Optional[str] = None,
+    alert_matched_ids: Optional[str] = None,
+    timestamp_alert_ingested: Optional[str] = None,
     path: Path = DB_PATH,
 ) -> str:
     """Insert a result row and return its result_id."""
     result_id = str(uuid.uuid4())
-
-    severity_delta = None
-    if severity_assigned and severity_expected:
-        severity_delta = _severity_delta(severity_assigned, severity_expected)
+    sev_delta = severity_delta(severity_assigned, severity_expected)
 
     with get_connection(path) as conn:
         conn.execute(
@@ -166,14 +199,16 @@ def save_result(
                 result_id, run_id, technique_id, technique_name, tactic,
                 timestamp_exec, timestamp_alert, latency_seconds, caught,
                 severity_assigned, severity_expected, severity_delta,
-                poll_checkpoint, raw_log_sample
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                poll_checkpoint, raw_log_sample, art_guid, alert_name,
+                alert_provider, alert_matched_ids, timestamp_alert_ingested
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 result_id, run_id, technique_id, technique_name, tactic,
                 timestamp_exec, timestamp_alert, latency_seconds, int(caught),
-                severity_assigned, severity_expected, severity_delta,
-                poll_checkpoint, raw_log_sample,
+                severity_assigned, severity_expected, sev_delta,
+                poll_checkpoint, raw_log_sample, art_guid, alert_name,
+                alert_provider, alert_matched_ids, timestamp_alert_ingested,
             ),
         )
     return result_id
@@ -252,7 +287,11 @@ def run_summary(run_id: str, path: Path = DB_PATH) -> dict:
     """
     results = get_results_for_run(run_id, path)
     if not results:
-        return {"run_id": run_id, "total": 0, "caught": 0, "missed": 0}
+        return {
+            "run_id": run_id, "total": 0, "caught": 0, "missed": 0,
+            "coverage_pct": None, "avg_latency_seconds": None,
+            "severity_miscalibrations": 0,
+        }
 
     total   = len(results)
     caught  = sum(1 for r in results if r["caught"])
@@ -280,24 +319,3 @@ def run_summary(run_id: str, path: Path = DB_PATH) -> dict:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-_SEVERITY_RANK = {
-    "informational": 0,
-    "low":           1,
-    "medium":        2,
-    "high":          3,
-}
-
-
-def _severity_delta(assigned: str, expected: str) -> int:
-    """
-    Positive delta means Sentinel under-rated the severity (bad).
-    Negative delta means Sentinel over-rated it.
-    Zero means accurate.
-    """
-    a = _SEVERITY_RANK.get(assigned.lower(), -1)
-    e = _SEVERITY_RANK.get(expected.lower(), -1)
-    if a == -1 or e == -1:
-        return 0
-    return e - a   # expected - assigned; positive = under-rated

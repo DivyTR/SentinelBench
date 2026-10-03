@@ -30,11 +30,9 @@ Environment
 import argparse
 import json
 import os
-import platform
 import socket
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 
 # Load .env before importing core modules so env vars are available
 try:
@@ -61,7 +59,6 @@ from core.db import (
     list_runs,
     get_results_for_run,
     get_kql_for_run,
-    get_missed_detections,
 )
 
 
@@ -151,7 +148,7 @@ def main() -> None:
     if args.technique:
         if args.technique not in TECHNIQUES:
             print(f"[error] Unknown technique '{args.technique}'")
-            print(f"        Use --list-techniques to see valid IDs.")
+            print("        Use --list-techniques to see valid IDs.")
             sys.exit(1)
         techniques = [args.technique]
         suite_name = args.technique
@@ -176,17 +173,19 @@ def main() -> None:
         client = None  # MetricsEngine handles dry_run internally
 
     # Create the run record
+    host = socket.gethostname()
     run_id = create_run(
         suite=suite_name,
-        host=socket.gethostname(),
-        sentinel_workspace=os.environ.get("SENTINEL_WORKSPACE_ID", "dry-run"),
+        host=host,
+        sentinel_workspace="dry-run" if dry_run else os.environ.get("SENTINEL_WORKSPACE_ID"),
         notes=args.notes,
+        dry_run=dry_run,
     )
     print(f"\n[run] Started run {run_id}")
     print(f"[run] Suite: {suite_name}  |  Techniques: {len(techniques)}\n")
 
     runner  = SimulationRunner(dry_run=dry_run)
-    metrics = MetricsEngine(client=client, dry_run=dry_run)
+    metrics = MetricsEngine(client=client, dry_run=dry_run, host=host)
     gen     = KQLGenerator()
 
     results = []
@@ -202,7 +201,7 @@ def main() -> None:
 
         if not sim_result["success"] and not dry_run:
             print(f"  [warn] ART execution failed: {sim_result['error']}")
-            print(f"  [warn] Skipping alert observation for this technique.")
+            print("  [warn] Skipping alert observation for this technique.")
             continue
 
         exec_time = datetime.fromisoformat(sim_result["timestamp_exec"])
@@ -210,6 +209,7 @@ def main() -> None:
         # 2. Observe Sentinel for alerts
         measurement = metrics.observe(
             technique_id=technique_id,
+            match_ids=meta["match_ids"],
             severity_expected=meta["severity_expected"],
             exec_time=exec_time,
         )
@@ -221,6 +221,7 @@ def main() -> None:
             else None
         )
 
+        alert = measurement["alert_row"] or {}
         result_id = save_result(
             run_id=run_id,
             technique_id=technique_id,
@@ -229,11 +230,16 @@ def main() -> None:
             timestamp_exec=sim_result["timestamp_exec"],
             caught=measurement["caught"],
             severity_expected=meta["severity_expected"],
-            timestamp_alert=measurement.get("alert_row", {}).get("TimeGenerated") if measurement["alert_row"] else None,
+            timestamp_alert=measurement["timestamp_alert"],
             latency_seconds=measurement["latency_seconds"],
             severity_assigned=measurement["severity_assigned"],
             poll_checkpoint=measurement["poll_checkpoint"],
             raw_log_sample=raw_log_json,
+            art_guid=meta["art_guid"],
+            alert_name=alert.get("AlertName") or alert.get("Title"),
+            alert_provider=alert.get("ProviderName"),
+            alert_matched_ids=json.dumps(alert["MatchedIds"]) if alert.get("MatchedIds") else None,
+            timestamp_alert_ingested=alert.get("IngestedAt"),
         )
 
         # 4. Generate KQL if missed
@@ -275,7 +281,7 @@ def _print_run_summary(run_id: str) -> None:
     print(f"  Caught          : {summary['caught']}  ({summary['coverage_pct']}%)")
     print(f"  Missed          : {summary['missed']}")
     avg = summary['avg_latency_seconds']
-    print(f"  Avg latency     : {avg:.0f}s" if avg else "  Avg latency     : n/a")
+    print(f"  Avg latency     : {avg:.0f}s" if avg is not None else "  Avg latency     : n/a")
     print(f"  Severity miscal.: {summary['severity_miscalibrations']}")
     print(f"{'=' * 60}")
 
@@ -297,11 +303,12 @@ def _print_history(n: int) -> None:
         print("[history] No runs found.")
         return
     print(f"\n{'-' * 80}")
-    print(f"{'Run ID':<38} {'Suite':<15} {'Started':<22} {'Finished'}")
+    print(f"{'Run ID':<38} {'Suite':<15} {'Started':<22} {'Finished':<18} {'Mode'}")
     print(f"{'-' * 80}")
     for r in runs:
         finished = r["finished_at"][:16] if r["finished_at"] else "in progress"
-        print(f"{r['run_id']:<38} {r['suite']:<15} {r['started_at'][:16]:<22} {finished}")
+        mode = "dry-run" if r.get("dry_run") else "live"
+        print(f"{r['run_id']:<38} {r['suite']:<15} {r['started_at'][:16]:<22} {finished:<18} {mode}")
 
 
 def _print_results(run_id: str) -> None:
@@ -312,7 +319,7 @@ def _print_results(run_id: str) -> None:
     print(f"\n{'-' * 80}")
     for r in results:
         status  = "CAUGHT" if r["caught"] else "MISSED"
-        latency = f"{r['latency_seconds']:.0f}s" if r["latency_seconds"] else "—"
+        latency = f"{r['latency_seconds']:.0f}s" if r["latency_seconds"] is not None else "—"
         sev     = r["severity_assigned"] or "—"
         delta   = r["severity_delta"]
         delta_s = f"delta={delta:+d}" if delta is not None else ""
