@@ -22,4 +22,19 @@ provider "azurerm" {
     }
   }
   subscription_id = var.subscription_id
+
+  # A new subscription has almost no resource providers registered, and
+  # azurerm 5.x does not register them implicitly. Register exactly the
+  # namespaces this lab uses (Terraform waits for registration to finish).
+  resource_providers_to_register = [
+    "Microsoft.Compute",              # VM, extensions, run command
+    "Microsoft.Consumption",          # budget
+    "Microsoft.DevTestLab",           # VM auto-shutdown schedule
+    "Microsoft.Insights",             # data collection rule + association
+    "Microsoft.ManagedIdentity",      # VM system-assigned identity
+    "Microsoft.Network",              # VNet, NSG, public IP, NIC
+    "Microsoft.OperationalInsights",  # Log Analytics workspace
+    "Microsoft.OperationsManagement", # Sentinel onboarding dependencies
+    "Microsoft.SecurityInsights",     # Sentinel
+  ]
 }
