@@ -255,7 +255,11 @@ TECHNIQUES: dict[str, dict] = {
     },
 }
 
-# Ordered list for the v1 suite — run in this sequence to avoid interference
+# Ordered list for the v1 suite. Techniques that change the host's defences
+# run last, so every earlier technique is measured against the same baseline:
+#   T1685     tries to stop Defender; if it ever succeeded, anything after it
+#             would run with AV off
+#   T1685.005 clears the Security log, destroying host-side evidence
 V1_SUITE_ORDER = [
     "T1059.003",  # cmd baseline first (lowest risk)
     "T1059.001",  # PowerShell
@@ -269,8 +273,8 @@ V1_SUITE_ORDER = [
     "T1040",      # Network sniffing
     "T1112",      # Modify registry
     "T1027",      # Obfuscation
-    "T1685",      # Disable AV (T1562.001 before ATT&CK v19)
-    "T1003.001",  # LSASS (high-impact — run near end)
+    "T1003.001",  # LSASS (high-impact — run near end, but before T1685)
+    "T1685",      # Disable AV (T1562.001 before ATT&CK v19) — after all non-defence tests
     "T1685.005",  # Clear logs (always last; T1070.001 before ATT&CK v19)
 ]
 

@@ -23,6 +23,12 @@ def test_log_clearing_runs_last():
     assert V1_SUITE_ORDER[-1] == "T1685.005"
 
 
+def test_defence_tampering_runs_after_every_other_technique():
+    # If stopping Defender ever succeeded, later techniques would be measured
+    # on a host without AV. Only log clearing may follow it.
+    assert V1_SUITE_ORDER[-2:] == ["T1685", "T1685.005"]
+
+
 @pytest.mark.parametrize("tid", list(TECHNIQUES))
 def test_registry_entry_is_well_formed(tid):
     meta = TECHNIQUES[tid]
