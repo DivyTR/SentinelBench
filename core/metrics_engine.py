@@ -96,7 +96,9 @@ class MetricsEngine:
         all checkpoints are exhausted.
 
         Checkpoints are absolute offsets from exec_time (T+2min means
-        exec_time + 2 minutes), not from when observe() is called.
+        exec_time + 2 minutes), not from when observe() is called, and each
+        poll only considers alerts created up to its checkpoint, so the
+        result does not depend on how promptly the polls actually run.
 
         Returns a measurement dict:
           caught             bool
@@ -124,10 +126,14 @@ class MetricsEngine:
                 )
                 self._sleep(sleep_seconds)
 
+            # Search only up to the checkpoint itself, not "now". If polling
+            # runs late (a paused console, a slow query), an alert created
+            # after T+15min must still count as missed, and an alert found at
+            # a late T+5 poll must not be credited to an earlier checkpoint.
             alert_row = self.client.check_alert_for_technique(
                 match_ids=match_ids,
                 since=exec_time,
-                until=self._clock(),
+                until=checkpoint_at,
                 host=self.host,
             )
 

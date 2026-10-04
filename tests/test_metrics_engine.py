@@ -107,3 +107,50 @@ def test_severity_delta(assigned, expected, delta):
 ])
 def test_latency_band(seconds, band):
     assert latency_band(seconds) == band
+
+
+class StallingClock(FakeClock):
+    """Every sleep overshoots by `stall` seconds, like a paused console."""
+
+    def __init__(self, start, stall):
+        super().__init__(start)
+        self.stall = stall
+
+    def sleep(self, seconds):
+        super().sleep(seconds + self.stall)
+
+
+class WindowedClient(FakeClient):
+    """Returns the alert only if it was created inside the polled window."""
+
+    def __init__(self, clock, alert_time):
+        super().__init__(clock)
+        self.alert_time = alert_time
+
+    def check_alert_for_technique(self, match_ids, since, until, host=None):
+        self.polls.append((since, until, host))
+        if since <= self.alert_time <= until:
+            return {"TimeGenerated": self.alert_time.isoformat(), "AlertSeverity": "High"}
+        return None
+
+
+def test_late_polling_never_counts_an_alert_created_after_the_last_checkpoint():
+    # Polls run hours late; the alert was created at T+30min, after the
+    # 15-minute cutoff. It must be recorded as missed, not as a 30-minute catch.
+    clock = StallingClock(T0, stall=4 * 3600)
+    client = WindowedClient(clock, alert_time=T0 + timedelta(minutes=30))
+    m = _engine(clock, client).observe("T1112", ["T1112"], "Medium", T0)
+    assert m["caught"] is False
+    assert [p[1] for p in client.polls] == [
+        T0 + timedelta(minutes=mins) for mins in (2, 5, 10, 15)
+    ]
+
+
+def test_late_polling_credits_an_alert_to_its_true_checkpoint():
+    # Alert created at T+4min; the T+2 poll runs very late but must not see it.
+    clock = StallingClock(T0, stall=600)
+    client = WindowedClient(clock, alert_time=T0 + timedelta(minutes=4))
+    m = _engine(clock, client).observe("T1112", ["T1112"], "High", T0)
+    assert m["caught"] is True
+    assert m["poll_checkpoint"] == "T+5min"
+    assert m["latency_seconds"] == 240
