@@ -123,6 +123,9 @@ budget alerts are the safety net.
 - **The bootstrap script is VM custom data.** Editing
   `scripts/bootstrap.ps1.tftpl` therefore **replaces the VM** on the next apply.
   That is deliberate: the lab is disposable and should always match the code.
+  **Start the VM before such an apply** (`az vm start -g rg-sbench-lab -n vm-sbench`).
+  Removing the monitoring agent extension from a deallocated VM makes Azure
+  wait for an agent that cannot answer; it took 17 minutes in testing.
 - **Pinned inputs**: the Sysmon config (release tag + SHA-256), Atomic Red Team and
   invoke-atomicredteam (commit SHAs). Sysinternals publishes no versioned Sysmon
   URLs, so the binary is the latest signed release. Its version is recorded in
