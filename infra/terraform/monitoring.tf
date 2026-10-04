@@ -68,6 +68,16 @@ resource "azurerm_monitor_data_collection_rule_association" "events" {
   data_collection_rule_id = azurerm_monitor_data_collection_rule.events.id
 }
 
+# Right after onboarding, Azure still rejects a Security-log rule with the
+# same "Data collection rule is invalid" error for a few minutes. Observed on
+# the first deployment: the identical rule succeeded on a retry ~5 minutes
+# later. If 5 minutes ever proves too short, simply re-run terraform apply.
+resource "time_sleep" "after_sentinel_onboarding" {
+  count           = var.enable_sentinel ? 1 : 0
+  create_duration = "5m"
+  depends_on      = [azurerm_sentinel_log_analytics_workspace_onboarding.lab]
+}
+
 resource "azurerm_monitor_data_collection_rule" "security" {
   count               = var.enable_sentinel ? 1 : 0
   name                = "dcr-${local.name}-security"
@@ -96,7 +106,7 @@ resource "azurerm_monitor_data_collection_rule" "security" {
     destinations = ["lab-workspace"]
   }
 
-  depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.lab]
+  depends_on = [time_sleep.after_sentinel_onboarding]
 }
 
 resource "azurerm_monitor_data_collection_rule_association" "security" {
