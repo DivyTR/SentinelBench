@@ -472,36 +472,78 @@ def _build_art_command(
     ]
 
 
-def _run_powershell(cmd: list[str], timeout: int = 120) -> dict:
-    """Execute a PowerShell command and return success/stdout/stderr."""
-    try:
-        proc = subprocess.run(
-            cmd,
+def _kill_process_tree(proc: "subprocess.Popen") -> None:
+    """
+    Kill a process and all its descendants.
+
+    subprocess's own timeout only kills the immediate child (powershell.exe);
+    a surviving grandchild (e.g. a hung net.exe) keeps the output pipe open,
+    so the follow-up read blocks forever. Killing the whole tree closes the
+    pipe. This turned a 120s timeout into a 13-hour hang in the first suite run.
+    """
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
             capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,   # exit codes are inspected below
+            check=False,
         )
-        return {
-            "success": proc.returncode == 0,
-            "stdout":  proc.stdout[:2000],
-            "stderr":  proc.stderr[:2000],
-            "error":   None if proc.returncode == 0 else f"exit code {proc.returncode}",
-        }
+    else:
+        import signal
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+
+
+def _run_powershell(cmd: list[str], timeout: int = 120) -> dict:
+    """
+    Execute a PowerShell command and return success/stdout/stderr.
+
+    Hardened against hangs: stdin is /dev/null so an interactive prompt
+    (net.exe asking for a password, for instance) gets EOF and fails instead
+    of blocking; the child runs in its own process group so a timeout can
+    kill the entire tree rather than leaking grandchildren.
+    """
+    popen_kwargs: dict = {
+        "stdin":  subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text":   True,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+    except OSError as exc:   # e.g. powershell.exe not found
+        return {"success": False, "stdout": "", "stderr": "", "error": str(exc)}
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            # The tree is dead, so the pipes close; bound this read anyway.
+            stdout, stderr = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
         return {
             "success": False,
-            "stdout":  "",
-            "stderr":  "",
+            "stdout":  (stdout or "")[:2000],
+            "stderr":  (stderr or "")[:2000],
             "error":   f"Timed out after {timeout}s",
         }
-    except OSError as exc:   # e.g. powershell.exe not found
-        return {
-            "success": False,
-            "stdout":  "",
-            "stderr":  "",
-            "error":   str(exc),
-        }
+
+    return {
+        "success": proc.returncode == 0,
+        "stdout":  (stdout or "")[:2000],
+        "stderr":  (stderr or "")[:2000],
+        "error":   None if proc.returncode == 0 else f"exit code {proc.returncode}",
+    }
 
 
 def _assert_windows() -> None:

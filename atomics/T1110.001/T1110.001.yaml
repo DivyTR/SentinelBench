@@ -1,45 +1,67 @@
 # SentinelBench custom atomic, in Atomic Red Team format.
 #
 # Why this exists: every upstream ART Windows test for T1110.001 targets
-# Active Directory (SMB/LDAP against a domain, or Kerbrute).  The v1 lab is
-# a single standalone VM, so this test guesses passwords against a local
-# account over loopback SMB instead.  It produces the same host telemetry
-# a failed-logon brute-force rule keys on: Security event 4625, logon type 3.
+# Active Directory (SMB/LDAP against a domain, or Kerbrute). The v1 lab is a
+# single standalone VM, so this test generates failed logons locally instead.
+#
+# It calls the Windows LogonUser API directly with a logon type of 3 (network)
+# and a wrong password, #{attempts} times. Each failed call produces a
+# Security event 4625 with LogonType 3 -- exactly what a failed-logon
+# brute-force rule keys on -- without any network connection, any interactive
+# prompt, or any child process. The target account does not need to exist;
+# an unknown user still generates 4625.
+#
+# An earlier version used a `net use` loop over loopback SMB. net.exe could
+# block on an interactive password prompt and spawn child processes, which
+# hung the first full suite run. LogonUser avoids all of that.
 #
 # Requires the "Logon" audit subcategory to log failures
 # (auditpol /set /subcategory:"Logon" /failure:enable), which the lab
-# provisioning enables.  If the VM has an account lockout threshold, the
-# target account will lock part-way through (event 4740) — expected.
+# provisioning enables.
 attack_technique: T1110.001
 display_name: 'Brute Force: Password Guessing'
 atomic_tests:
-- name: Local account password guessing over loopback SMB (SentinelBench)
+- name: Local failed logons via LogonUser (SentinelBench)
   auto_generated_guid: 2a0a08a4-1f45-4089-984d-656e7764f699
   description: |
-    Creates a local account with a random password, then attempts
-    #{attempts} SMB logons to \\127.0.0.1\IPC$ as that account with wrong
-    passwords. Cleanup deletes the account.
+    Calls LogonUser with a wrong password #{attempts} times against a local
+    account name, generating Security event 4625 (failed logon, type 3).
+    Self-contained: no network, no prompts, no child processes, nothing to
+    clean up.
   supported_platforms:
   - windows
   input_arguments:
     username:
-      description: Local account to create and target
+      description: Local account name to target (need not exist)
       type: string
       default: sb_brute_target
     attempts:
-      description: Number of wrong-password logon attempts
+      description: Number of failed logon attempts
       type: integer
       default: 20
   executor:
     name: powershell
-    elevation_required: true
+    elevation_required: false
     command: |
-      $real = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object {[char]$_}) + '!a1'
-      net user #{username} $real /add | Out-Null
-      foreach ($i in 1..#{attempts}) {
-        net use \\127.0.0.1\IPC$ /user:"$env:COMPUTERNAME\#{username}" "WrongGuess$i!" 2>&1 | Out-Null
-        net use \\127.0.0.1\IPC$ /delete /y 2>&1 | Out-Null
+      $signature = @"
+      using System;
+      using System.Runtime.InteropServices;
+      public static class SbLogon {
+          [DllImport("advapi32.dll", SetLastError=true)]
+          public static extern bool LogonUser(
+              string user, string domain, string password,
+              int logonType, int logonProvider, out IntPtr token);
       }
-      Write-Host "Made #{attempts} failed logon attempts as #{username}"
-    cleanup_command: |
-      net user #{username} /delete 2>&1 | Out-Null
+      "@
+      Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue
+      $LOGON32_LOGON_NETWORK = 3
+      $LOGON32_PROVIDER_DEFAULT = 0
+      $failures = 0
+      for ($i = 1; $i -le #{attempts}; $i++) {
+          $token = [IntPtr]::Zero
+          $ok = [SbLogon]::LogonUser(
+              "#{username}", $env:COMPUTERNAME, "WrongGuess_$i!",
+              $LOGON32_LOGON_NETWORK, $LOGON32_PROVIDER_DEFAULT, [ref]$token)
+          if (-not $ok) { $failures++ }
+      }
+      Write-Host "Generated $failures failed logon attempts for #{username}"

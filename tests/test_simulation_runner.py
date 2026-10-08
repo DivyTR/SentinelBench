@@ -171,3 +171,49 @@ def test_exec_timestamp_is_taken_after_prerequisites(monkeypatch, live_runner):
     assert events[:5] == ["ps:prereq", "ps:prereq", "now", "ps:exec", "now"]
     assert result["timestamp_exec"] == "t1"
     assert result["timestamp_exec_end"] == "t2"
+
+
+# ── _run_powershell robustness (the 13-hour-hang regression) ────────────────────
+
+def test_run_powershell_times_out_promptly_and_kills_the_tree(tmp_path):
+    # A real child that would otherwise run far longer than the timeout. The
+    # call must return at ~timeout, not hang (the brute-force regression).
+    import time
+    start = time.monotonic()
+    result = sr._run_powershell(
+        ["python3", "-c", "import time; time.sleep(60)"], timeout=2
+    )
+    elapsed = time.monotonic() - start
+    assert result["success"] is False
+    assert "Timed out" in result["error"]
+    assert elapsed < 20, f"timeout did not return promptly ({elapsed:.1f}s)"
+
+
+def test_run_powershell_closes_stdin_so_prompts_do_not_block():
+    # A child that reads stdin must get EOF immediately, not block forever.
+    result = sr._run_powershell(
+        ["python3", "-c", "import sys; sys.stdin.read(); print('done')"], timeout=5
+    )
+    assert "Timed out" not in (result["error"] or "")
+
+
+def test_run_powershell_reports_exit_code():
+    ok = sr._run_powershell(["python3", "-c", "print('hi')"], timeout=10)
+    assert ok["success"] is True and "hi" in ok["stdout"]
+    bad = sr._run_powershell(["python3", "-c", "import sys; sys.exit(3)"], timeout=10)
+    assert bad["success"] is False and bad["error"] == "exit code 3"
+
+
+def test_brute_force_atomic_is_self_contained():
+    # The net use loop hung the first suite run; the replacement must not use
+    # net use and must need no cleanup.
+    import yaml
+    doc = yaml.safe_load(
+        (sr.CUSTOM_ATOMICS_DIR / "T1110.001" / "T1110.001.yaml").read_text()
+    )
+    test = doc["atomic_tests"][0]
+    assert test["auto_generated_guid"] == TECHNIQUES["T1110.001"]["art_guid"]
+    command = test["executor"]["command"]
+    assert "net use" not in command
+    assert "LogonUser" in command
+    assert "cleanup_command" not in test["executor"]
