@@ -119,10 +119,14 @@ def _safe_console_output() -> None:
     Windows encodes stdout with the legacy ANSI code page (cp1252), and any
     character outside it crashes the run with UnicodeEncodeError. Console
     output is kept ASCII, and this replaces anything else instead of crashing.
+
+    Piped output is also block-buffered by default, so a multi-hour run would
+    show nothing (in the console or the log) until several KB had accumulated.
+    Line buffering makes progress visible as it happens.
     """
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")
+            stream.reconfigure(errors="replace", line_buffering=True)
         except (AttributeError, ValueError):
             pass
 
