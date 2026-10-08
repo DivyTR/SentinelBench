@@ -50,6 +50,7 @@ from core import (
     MetricsEngine,
     SentinelClient,
     SimulationRunner,
+    checkpoints_for_max_wait,
     init_db,
 )
 from core.db import (
@@ -108,6 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--notes", metavar="TEXT", default="",
         help="Optional notes to attach to this run",
     )
+    p.add_argument(
+        "--max-wait", metavar="MIN", type=int, default=15,
+        help="Minutes to wait for an alert before recording a miss "
+             "(default 15). Use a small value (e.g. 3) for a baseline run "
+             "with no detection rules, where every technique is missed.",
+    )
     return p
 
 
@@ -163,6 +170,12 @@ def main() -> None:
         parser.print_help()
         sys.exit(0)
 
+    try:
+        checkpoints = checkpoints_for_max_wait(args.max_wait)
+    except ValueError as exc:
+        print(f"[error] {exc}")
+        sys.exit(1)
+
     dry_run = args.dry_run
 
     # Build technique list
@@ -206,7 +219,13 @@ def main() -> None:
     print(f"[run] Suite: {suite_name}  |  Techniques: {len(techniques)}\n")
 
     runner  = SimulationRunner(dry_run=dry_run)
-    metrics = MetricsEngine(client=client, dry_run=dry_run, host=host)
+    if args.max_wait != 15 and not dry_run:
+        print(f"[mode] Alert wait capped at T+{args.max_wait}min "
+              f"(checkpoints: {', '.join(f'T+{c}min' for c in checkpoints)})")
+
+    metrics = MetricsEngine(
+        client=client, dry_run=dry_run, host=host, checkpoints=checkpoints,
+    )
     gen     = KQLGenerator()
 
     results = []

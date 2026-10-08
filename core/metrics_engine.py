@@ -40,6 +40,22 @@ LATENCY_RED    = 900    # > 10 min — unlikely to prevent attacker progress
 POLL_CHECKPOINTS_MINUTES = [2, 5, 10, 15]
 
 
+def checkpoints_for_max_wait(max_wait_minutes: int) -> list[int]:
+    """
+    The default poll schedule truncated to max_wait_minutes.
+
+    Keeps every default checkpoint at or below the cutoff, and always ends
+    exactly at the cutoff so "missed" means "nothing by max_wait":
+      15 -> [2, 5, 10, 15]   (the default)
+       3 -> [2, 3]
+       1 -> [1]
+    """
+    if max_wait_minutes < 1:
+        raise ValueError("max_wait_minutes must be at least 1")
+    kept = [c for c in POLL_CHECKPOINTS_MINUTES if c < max_wait_minutes]
+    return kept + [max_wait_minutes]
+
+
 def latency_band(latency_seconds: float | None) -> str:
     """Return a human-readable band label for a latency value."""
     if latency_seconds is None:
@@ -74,12 +90,17 @@ class MetricsEngine:
         client: SentinelClient | None,
         dry_run: bool = False,
         host: str | None = None,
+        checkpoints: list[int] | None = None,
         clock=None,
         sleep=time.sleep,
     ):
         self.client  = client
         self.dry_run = dry_run
         self.host    = host
+        # Poll offsets (minutes after execution). Default is the full schedule;
+        # a shorter list (see checkpoints_for_max_wait) cuts an all-missed
+        # control run from ~15 min/technique to a couple of minutes.
+        self.checkpoints = checkpoints or POLL_CHECKPOINTS_MINUTES
         # Injectable for tests; production uses the real clock and sleep.
         self._clock  = clock or (lambda: datetime.now(timezone.utc))
         self._sleep  = sleep
@@ -116,7 +137,7 @@ class MetricsEngine:
         if self.dry_run:
             return _dry_run_measurement(technique_id, severity_expected)
 
-        for checkpoint_minutes in POLL_CHECKPOINTS_MINUTES:
+        for checkpoint_minutes in self.checkpoints:
             checkpoint_at = exec_time + timedelta(minutes=checkpoint_minutes)
             sleep_seconds = (checkpoint_at - self._clock()).total_seconds()
             if sleep_seconds > 0:
@@ -169,7 +190,7 @@ class MetricsEngine:
                 }
 
         # All checkpoints exhausted — missed detection
-        print(f"    [obs] MISSED - no alert found within {POLL_CHECKPOINTS_MINUTES[-1]} minutes")
+        print(f"    [obs] MISSED - no alert found within {self.checkpoints[-1]} minutes")
 
         raw_logs = _safe_fetch_logs(self.client, technique_id, exec_time, self.host)
 

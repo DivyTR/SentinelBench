@@ -10,7 +10,7 @@ core — SentinelBench internal modules.
 
 from .db import init_db
 from .kql_generator import KQLGenerator
-from .metrics_engine import MetricsEngine, latency_band
+from .metrics_engine import MetricsEngine, checkpoints_for_max_wait, latency_band
 from .sentinel_client import SentinelClient
 from .simulation_runner import TECHNIQUES, V1_SUITE_ORDER, SimulationRunner
 
@@ -21,6 +21,7 @@ __all__ = [
     "MetricsEngine",
     "SentinelClient",
     "SimulationRunner",
+    "checkpoints_for_max_wait",
     "init_db",
     "latency_band",
 ]

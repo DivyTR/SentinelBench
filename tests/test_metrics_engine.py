@@ -5,6 +5,7 @@ import pytest
 from core.metrics_engine import (
     MetricsEngine,
     _parse_alert_time,
+    checkpoints_for_max_wait,
     latency_band,
     severity_delta,
 )
@@ -154,3 +155,35 @@ def test_late_polling_credits_an_alert_to_its_true_checkpoint():
     assert m["caught"] is True
     assert m["poll_checkpoint"] == "T+5min"
     assert m["latency_seconds"] == 240
+
+
+# ── --max-wait checkpoint schedule ──────────────────────────────────────────────
+
+@pytest.mark.parametrize("max_wait,expected", [
+    (15, [2, 5, 10, 15]),   # the default schedule
+    (10, [2, 5, 10]),
+    (3,  [2, 3]),
+    (2,  [2]),
+    (1,  [1]),
+    (30, [2, 5, 10, 15, 30]),
+])
+def test_checkpoints_for_max_wait(max_wait, expected):
+    assert checkpoints_for_max_wait(max_wait) == expected
+
+
+def test_checkpoints_for_max_wait_rejects_zero():
+    with pytest.raises(ValueError):
+        checkpoints_for_max_wait(0)
+
+
+def test_short_max_wait_misses_quickly_and_only_polls_its_checkpoints():
+    # A 3-minute cap: poll at T+2 and T+3, then record missed. This is the
+    # baseline-run shortcut that turns a 15-min wait into ~3 min.
+    clock = FakeClock(T0)
+    engine = MetricsEngine(
+        FakeClient(clock), host="sb-lab",
+        checkpoints=checkpoints_for_max_wait(3), clock=clock, sleep=clock.sleep,
+    )
+    m = engine.observe("T1112", ["T1112"], "Medium", T0)
+    assert m["caught"] is False
+    assert clock.sleeps == [120, 60]  # T+2min, then T+3min
