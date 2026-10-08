@@ -349,7 +349,7 @@ class SimulationRunner:
         print(f"  [sim] Running {technique_id} ({meta['name']}) ...")
 
         if self.dry_run:
-            print(f"  [sim] DRY RUN — would execute ART test {meta['art_guid']}")
+            print(f"  [sim] DRY RUN - would execute ART test {meta['art_guid']}")
             now = _now()
             return {
                 **base,

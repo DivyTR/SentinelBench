@@ -41,7 +41,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    print("[warn] python-dotenv not installed — reading env vars from shell only")
+    print("[warn] python-dotenv not installed - reading env vars from shell only")
 
 from core import (
     TECHNIQUES,
@@ -113,7 +113,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 # ── main ───────────────────────────────────────────────────────────────────────
 
+def _safe_console_output() -> None:
+    """
+    When output is piped (e.g. into Tee-Object to keep a log), Python on
+    Windows encodes stdout with the legacy ANSI code page (cp1252), and any
+    character outside it crashes the run with UnicodeEncodeError. Console
+    output is kept ASCII, and this replaces anything else instead of crashing.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> None:
+    _safe_console_output()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -165,13 +180,13 @@ def main() -> None:
             client = SentinelClient()
             print("[auth] Testing Sentinel connection ...")
             client.test_connection()
-            print("[auth] Connected to Log Analytics workspace ✓")
+            print("[auth] Connected to Log Analytics workspace OK")
         except (SentinelClientError, requests.RequestException) as exc:
             print(f"[error] Sentinel connection failed: {exc}")
             print("        Check your .env credentials or use --dry-run to test the pipeline.")
             sys.exit(1)
     else:
-        print("[mode] DRY RUN — no ART execution, synthetic alert data")
+        print("[mode] DRY RUN - no ART execution, synthetic alert data")
         client = None  # MetricsEngine handles dry_run internally
 
     # Create the run record
@@ -321,8 +336,8 @@ def _print_results(run_id: str) -> None:
     print(f"\n{'-' * 80}")
     for r in results:
         status  = "CAUGHT" if r["caught"] else "MISSED"
-        latency = f"{r['latency_seconds']:.0f}s" if r["latency_seconds"] is not None else "—"
-        sev     = r["severity_assigned"] or "—"
+        latency = f"{r['latency_seconds']:.0f}s" if r["latency_seconds"] is not None else "-"
+        sev     = r["severity_assigned"] or "-"
         delta   = r["severity_delta"]
         delta_s = f"delta={delta:+d}" if delta is not None else ""
         print(f"  {r['technique_id']:<14} [{status}]  latency={latency:<6}  sev={sev:<14} {delta_s}")

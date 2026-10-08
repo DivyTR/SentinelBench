@@ -145,7 +145,7 @@ class MetricsEngine:
                 checkpoint_label = f"T+{checkpoint_minutes}min"
 
                 print(
-                    f"    [obs] CAUGHT at {checkpoint_label} — "
+                    f"    [obs] CAUGHT at {checkpoint_label} - "
                     f"latency={latency:.0f}s  severity={sev_assigned} "
                     f"(expected {severity_expected})"
                 )
@@ -169,7 +169,7 @@ class MetricsEngine:
                 }
 
         # All checkpoints exhausted — missed detection
-        print(f"    [obs] MISSED — no alert found within {POLL_CHECKPOINTS_MINUTES[-1]} minutes")
+        print(f"    [obs] MISSED - no alert found within {POLL_CHECKPOINTS_MINUTES[-1]} minutes")
 
         raw_logs = _safe_fetch_logs(self.client, technique_id, exec_time, self.host)
 
@@ -260,7 +260,7 @@ def _safe_fetch_logs(
     try:
         return client.fetch_raw_logs(technique_id, exec_time, window_minutes=5, host=host)
     except (SentinelClientError, requests.RequestException, ValueError) as exc:
-        print(f"    [obs] Warning: could not fetch raw logs — {exc}")
+        print(f"    [obs] Warning: could not fetch raw logs - {exc}")
         return []
 
 
