@@ -155,10 +155,12 @@ TECHNIQUES: dict[str, dict] = {
         "match_ids":         ["T1110.001", "T1110"],
         "art_guid":          "2a0a08a4-1f45-4089-984d-656e7764f699",
         "atomics":           "custom",
-        "description":       "Custom atomic: creates a local account, then makes 20 "
-                             "wrong-password SMB logons to it over loopback.  Upstream "
-                             "ART's Windows tests for this technique all need Active "
-                             "Directory.  Tests failed-logon (4625) correlation.",
+        "description":       "Custom atomic: creates a throwaway local account, makes 20 "
+                             "wrong-password LogonUser (type 3) attempts against it, then "
+                             "deletes it. Upstream ART's Windows tests for this technique "
+                             "all need Active Directory. Targets a real account so "
+                             "valid-account brute-force rules apply; tests failed-logon "
+                             "(4625) correlation.",
         "cleanup":           True,
     },
     "T1552.001": {
