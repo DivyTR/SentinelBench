@@ -4,39 +4,43 @@
 # Active Directory (SMB/LDAP against a domain, or Kerbrute). The v1 lab is a
 # single standalone VM, so this test generates failed logons locally instead.
 #
-# It creates a throwaway local account, then calls the Windows LogonUser API
-# directly with a logon type of 3 (network) and a wrong password, #{attempts}
-# times, and finally deletes the account. Each failed call produces a Security
-# event 4625 with LogonType 3 against a *real* account -- so Sentinel rules
-# that only consider valid accounts (e.g. "Failed logon attempts by valid
-# accounts within 10 mins") apply -- without any network connection,
-# interactive prompt, or child process.
+# It ensures a standing local target account exists (creating it once, with a
+# random password, if absent), then calls the Windows LogonUser API directly
+# with a logon type of 3 (network) and a wrong password, #{attempts} times.
+# Each failed call produces a Security event 4625 with LogonType 3 against a
+# *real* account -- so Sentinel rules that only consider valid accounts (e.g.
+# "Failed logon attempts by valid accounts within 10 mins") apply -- without
+# any network connection, interactive prompt, or child process.
 #
-# An earlier version looped `net use` over loopback SMB; net.exe could block
-# on a password prompt and spawn children, which hung a full suite run.
-# LogonUser avoids that. A still-earlier LogonUser version targeted a
-# non-existent user, which valid-account brute-force rules ignore; this one
-# creates the account first.
+# The account is NOT created-and-deleted each run, and NOT added to any
+# privileged group: earlier versions did, which tripped unrelated account
+# lifecycle rules ("User account created and deleted within 10 mins") and
+# mis-attributed that detection to this technique. The standing account is
+# created once and left in place; subsequent runs reuse it and emit no 4720.
 #
-# Requires the "Logon" audit subcategory to log failures (the lab
-# provisioning enables it) and local admin (to create the account).
-# Standalone Windows Server has no account-lockout policy by default, so the
-# attempts do not lock the account; cleanup deletes it regardless.
+# An even earlier version looped `net use` over loopback SMB; net.exe could
+# block on a password prompt and spawn children, which hung a full suite run.
+# LogonUser avoids that.
+#
+# Requires the "Logon" audit subcategory to log failures (the lab provisioning
+# enables it) and local admin (to create the account the first time). No
+# account-lockout policy exists on standalone Windows Server by default, so the
+# attempts do not lock the account.
 attack_technique: T1110.001
 display_name: 'Brute Force: Password Guessing'
 atomic_tests:
-- name: Local failed logons against a valid account via LogonUser (SentinelBench)
+- name: Local failed logons against a standing account via LogonUser (SentinelBench)
   auto_generated_guid: 2a0a08a4-1f45-4089-984d-656e7764f699
   description: |
-    Creates a local account with a random strong password, calls LogonUser
-    with a wrong password #{attempts} times against it (Security event 4625,
-    type 3), then deletes the account. Self-contained: no network, no
-    prompts, no child processes.
+    Ensures a standing local account exists, then calls LogonUser with a wrong
+    password #{attempts} times against it (Security event 4625, type 3).
+    Self-contained: no network, no prompts, no child processes. The account is
+    created once and reused; nothing is deleted.
   supported_platforms:
   - windows
   input_arguments:
     username:
-      description: Local account to create, target and delete
+      description: Standing local account to target (created once if absent)
       type: string
       default: sb_brute_target
     attempts:
@@ -47,8 +51,10 @@ atomic_tests:
     name: powershell
     elevation_required: true
     command: |
-      $realpw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 20 | ForEach-Object {[char]$_}) + '!aA9'
-      net user "#{username}" "$realpw" /add | Out-Null
+      if (-not (Get-LocalUser -Name "#{username}" -ErrorAction SilentlyContinue)) {
+          $realpw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 20 | ForEach-Object {[char]$_}) + '!aA9'
+          net user "#{username}" "$realpw" /add | Out-Null
+      }
       $signature = @"
       using System;
       using System.Runtime.InteropServices;
@@ -70,6 +76,4 @@ atomic_tests:
               $LOGON32_LOGON_NETWORK, $LOGON32_PROVIDER_DEFAULT, [ref]$token)
           if (-not $ok) { $failures++ }
       }
-      Write-Host "Generated $failures failed logon attempts for valid account #{username}"
-    cleanup_command: |
-      net user "#{username}" /delete 2>&1 | Out-Null
+      Write-Host "Generated $failures failed logon attempts for standing account #{username}"

@@ -204,10 +204,11 @@ def test_run_powershell_reports_exit_code():
     assert bad["success"] is False and bad["error"] == "exit code 3"
 
 
-def test_brute_force_atomic_targets_a_real_account_without_net_use():
-    # The net use loop hung the first suite run, so no net use. The target
-    # account must be created (and cleaned up) so valid-account brute-force
-    # rules apply.
+def test_brute_force_atomic_uses_a_standing_account_without_net_use():
+    # The net use loop hung the first suite run, so no net use. The account is
+    # created once if absent and never deleted, so it does not trip account
+    # lifecycle rules ("created and deleted within 10 mins") -> that detection
+    # must not be mis-credited to brute force.
     import yaml
     doc = yaml.safe_load(
         (sr.CUSTOM_ATOMICS_DIR / "T1110.001" / "T1110.001.yaml").read_text()
@@ -218,6 +219,7 @@ def test_brute_force_atomic_targets_a_real_account_without_net_use():
     assert "net use \\\\" not in command   # no SMB loop (the hang)
     assert "127.0.0.1" not in command
     assert "LogonUser" in command
-    assert "net user" in command and "/add" in command        # creates the account
-    assert "/delete" in test["executor"]["cleanup_command"]    # and removes it
-    assert TECHNIQUES["T1110.001"]["cleanup"] is True
+    assert "Get-LocalUser" in command      # create-if-absent guard
+    assert "/delete" not in command        # standing account, never deleted
+    assert "cleanup_command" not in test["executor"]
+    assert TECHNIQUES["T1110.001"]["cleanup"] is False
