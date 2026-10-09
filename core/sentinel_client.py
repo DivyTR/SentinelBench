@@ -218,11 +218,20 @@ class SentinelClient:
 
         How matching works
         ------------------
-        SecurityAlert has a `Techniques` column (JSON array of ATT&CK IDs);
-        some providers only put the IDs in ExtendedProperties.  We extract
-        every ATT&CK ID from both with a regex and require an EXACT match
-        against match_ids.  A plain `has "T1059"` would also match alerts
-        tagged T1059.003 and credit them to the wrong technique.
+        We match ONLY on the alert's declared MITRE mapping: the `Techniques`
+        column on SecurityAlert (a JSON array of ATT&CK IDs set by the rule).
+        We require an EXACT id match against match_ids. A plain `has "T1059"`
+        would also match alerts tagged T1059.003 and credit the wrong
+        technique.
+
+        We deliberately do NOT read ExtendedProperties or any other field that
+        carries the raw event that triggered the rule. Those fields contain the
+        offending command line, and SentinelBench launches every technique with
+        a harness command that names the technique ("Invoke-AtomicTest
+        T1552.001 ..."). Extracting IDs from that text matched a technique to
+        its own harness invocation, so a single broadly-firing rule was
+        credited as a detection for a dozen unrelated techniques. Matching only
+        the rule's declared Techniques removes that false attribution.
 
         If `host` is given, the alert must name it in CompromisedEntity or
         Entities, so alerts from other machines in the workspace are ignored.
@@ -244,8 +253,7 @@ class SentinelClient:
 SecurityAlert
 | where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
 | extend IngestedAt = ingestion_time()
-| extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)",
-                                 strcat(tostring(Techniques), " ", tostring(ExtendedProperties)))
+| extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)", tostring(Techniques))
 | extend MatchedIds = set_intersect(AttackIds, {ids})
 | where array_length(MatchedIds) > 0
 {host_filter}| summarize arg_min(TimeGenerated, *) by SystemAlertId
@@ -259,11 +267,14 @@ SecurityAlert
         if rows:
             return {**rows[0], "SourceTable": "SecurityAlert"}
 
-        # Fallback: SecurityIncident (aggregated alerts → incidents)
+        # Fallback: SecurityIncident (aggregated alerts -> incidents). Read the
+        # incident's own techniques field, not the whole AdditionalData blob,
+        # for the same reason as above.
         kql_incident = f"""
 SecurityIncident
 | where CreatedTime between (datetime({since_str}) .. datetime({until_str}))
-| extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)", tostring(AdditionalData))
+| extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)",
+                                 tostring(parse_json(tostring(AdditionalData)).techniques))
 | extend MatchedIds = set_intersect(AttackIds, {ids})
 | where array_length(MatchedIds) > 0
 | summarize arg_min(CreatedTime, *) by IncidentNumber

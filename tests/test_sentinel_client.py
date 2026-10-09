@@ -52,6 +52,11 @@ def test_alert_query_matches_exact_ids_from_techniques_column():
     assert 'set_intersect(AttackIds, dynamic(["T1003.001", "T1003"]))' in kql
     # The old bug: Tactics holds tactic names, never technique IDs.
     assert "Tactics has" not in kql
+    # Regression: matching ExtendedProperties pulled the technique ID out of
+    # the harness command line ("Invoke-AtomicTest T1552.001 ..."), crediting
+    # one broadly-firing rule as a detection for a dozen techniques. Match the
+    # rule's declared Techniques only.
+    assert "ExtendedProperties" not in kql
     assert "summarize arg_min(TimeGenerated, *) by SystemAlertId" in kql
     assert timespan == "2026-10-03T10:00:00.000000Z/2026-10-03T10:05:00.000000Z"
 
