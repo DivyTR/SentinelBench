@@ -14,236 +14,161 @@
 Most security teams assume their SIEM is working. They configure detection rules, watch the dashboard, and move on. But two questions almost nobody can answer with evidence are:
 
 1. **Does Sentinel actually alert when a real attack technique runs?**
-2. **If it does alert — how long did it take, and was the severity rating correct?**
+2. **If it does alert — how long did it take, and was the severity rating appropriate?**
 
 A detection that fires 45 minutes after execution is operationally useless against a fast-moving attacker. A credential-dumping attempt logged as *Low* severity gets deprioritised by the analyst and never investigated. Both outcomes look like "working security" on paper. Neither is.
 
-Commercial platforms like AttackIQ and Picus Security answer these questions — but they cost upwards of $30,000 per year and are designed for enterprise security teams. SentinelBench is an open-source alternative built around a single, precise workflow: **simulate, observe, measure, suggest**.
+Commercial breach-and-attack-simulation platforms answer these questions but cost upwards of $30,000 per year. SentinelBench is an open-source take on the same workflow for a single SIEM, built around four steps: **simulate, observe, measure, suggest.**
 
 ---
 
-## What SentinelBench Does
+## Project status
 
-SentinelBench executes safe, lab-isolated attack simulations drawn from Atomic Red Team, then queries the Microsoft Sentinel Log Analytics API to measure three things per technique:
+This is an active build, developed in phases. It runs against a real Azure Sentinel lab, not just in theory.
 
-| Metric | Description |
-|--------|-------------|
-| **Caught / Missed** | Did Sentinel fire any alert for this technique? |
-| **Detection Latency** | How many seconds elapsed between technique execution and alert creation? |
-| **Severity Accuracy** | Does the assigned severity match the expected severity SentinelBench assigns to the technique? |
+| Phase | What | State |
+|---|---|---|
+| 0 | Correct measurement engine, pinned ART tests, unit tests, CI | **done** |
+| 1 | Reproducible Azure lab as Terraform (workspace, Sentinel, monitored Windows VM, cost guardrails) | **done** |
+| 2 | Measurement runs against real Sentinel — config A (no rules) and config B (built-in rules) | **in progress** |
+| 3 | Closed loop — generate rules for the gaps, deploy, re-measure; published results write-up | planned |
 
-For every missed detection, SentinelBench generates a candidate KQL (Kusto Query Language) detection rule. Today most rules are per-technique templates; seeding them with the event data observed during the run is in progress (see Roadmap).
-
-The results are visualised as an ATT&CK heatmap where colour encodes latency (not just binary pass/fail), giving a security team a continuous quality score rather than a compliance checkbox.
-
----
-
-## Why Latency and Severity Matter More Than Coverage
-
-Most detection validation tools report coverage: *n out of m techniques detected*. That framing treats all detections as equal. They are not.
-
-Consider two SOC scenarios:
-
-- **Scenario A**: A brute-force attempt (T1110.001) fires an alert 4 minutes after execution with severity *High*. The analyst investigates immediately, containment begins within 10 minutes.
-- **Scenario B**: LSASS credential dumping (T1003.001) fires an alert 52 minutes after execution with severity *Informational*. The analyst queues it for end-of-day review. By then, the attacker has harvested credentials and established persistence on three additional hosts.
-
-Both scenarios score as "detected" on a coverage report. Only one reflects a security posture that would contain a real incident. SentinelBench measures the difference.
+Final coverage/latency numbers are deliberately **not** published in this README yet; they are being collected and will be added with the methodology that produced them. The measurement engine and its integrity rules (below) are the part that is settled.
 
 ---
 
-## Architecture
+## Why latency and severity, not just coverage
+
+Most detection-validation tools report coverage: *n of m techniques detected*. That framing treats all detections as equal. They are not. A rule that fires an hour late, or at a severity an analyst will deprioritise, counts as a "pass" on a coverage report and as a failure in a real incident. SentinelBench measures the difference: for every technique it records **caught/missed, detection latency, and severity accuracy**, and colour-codes the ATT&CK heatmap by latency rather than a binary pass/fail.
+
+---
+
+## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Lab Environment                       │
-│                  (Windows VM — isolated network)             │
-│                                                              │
-│   ┌──────────────────────────────────────────────────────┐  │
-│   │          Simulation Engine (Python + PowerShell)     │  │
-│   │   Atomic Red Team atomic executes technique T-XXXX   │  │
-│   │   Records: technique ID, timestamp_exec, host info   │  │
-│   └────────────────────┬─────────────────────────────────┘  │
-│                        │ Windows Event logs                  │
-│                        ▼                                     │
-│   ┌──────────────────────────────────────────────────────┐  │
-│   │         Microsoft Sentinel (Log Analytics)           │  │
-│   │   Ingests: SecurityEvent, Sysmon, MDE telemetry      │  │
-│   └────────────────────┬─────────────────────────────────┘  │
-└────────────────────────┼────────────────────────────────────┘
-                         │ Log Analytics REST API
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    SentinelBench Core                        │
-│                                                              │
-│  ┌─────────────────┐    ┌──────────────────────────────┐   │
-│  │  Alert Observer │    │   Metrics Engine              │   │
-│  │                 │    │                               │   │
-│  │  Polls Sentinel │    │  • Caught / Missed flag       │   │
-│  │  API at T+0,    │───▶│  • Latency = T_alert - T_exec │   │
-│  │  T+2, T+5,      │    │  • Severity delta vs ATT&CK   │   │
-│  │  T+10 minutes   │    │    expected impact            │   │
-│  └─────────────────┘    └──────────────┬───────────────┘   │
-│                                         │                    │
-│  ┌──────────────────────────────────────▼───────────────┐   │
-│  │               KQL Suggestion Engine                   │   │
-│  │                                                       │   │
-│  │  Only fires on missed detections                      │   │
-│  │  Pulls raw logs (EventID, process name, cmdline,      │   │
-│  │  parent process) from the simulation window           │   │
-│  │  Generates targeted KQL using event-seeded templates  │   │
-│  │  Tags each rule with: ATT&CK ID, data source,        │   │
-│  │  confidence level, and false-positive risk note       │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │                  SQLite Result Store                  │   │
-│  │  run_id · technique_id · timestamp_exec · latency_s  │   │
-│  │  caught · severity_assigned · severity_expected ·    │   │
-│  │  kql_suggestion · raw_log_sample                     │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Dashboard  (React + D3.js)                 │
-│                                                              │
-│   View 1 — ATT&CK Heatmap                                   │
-│   Colour encodes latency gradient (green → amber → red)     │
-│   Grey = not covered in v1 scope                            │
-│                                                              │
-│   View 2 — Run History Table                                 │
-│   Per-technique: result, latency (s), severity match, date  │
-│                                                              │
-│   View 3 — Remediation Panel                                 │
-│   Missed detections only, with generated KQL + copy button  │
-└─────────────────────────────────────────────────────────────┘
+ ┌───────────────────────────── Azure lab (infra/, Terraform) ─────────────────────────────┐
+ │                                                                                          │
+ │   Windows Server 2022 VM                         Log Analytics workspace + Sentinel      │
+ │   ├─ Sysmon (pinned config)                      ├─ SecurityEvent  (Security log)        │
+ │   ├─ Azure Monitor Agent  ──── DCRs ───────────▶ └─ Event          (Sysmon, PowerShell   │
+ │   ├─ Atomic Red Team (pinned commit, by GUID)                       4104, Defender, Sys) │
+ │   ├─ Python + SentinelBench                                                              │
+ │   └─ system-assigned identity ─ Log Analytics Reader ─▶ (no secrets anywhere)            │
+ │                                                                                          │
+ └──────────────────────────────────────────┬───────────────────────────────────────────────┘
+                                             │  Log Analytics REST API (managed identity)
+                                             ▼
+ ┌──────────────────────────────── SentinelBench (runs on the VM) ──────────────────────────┐
+ │  SimulationRunner   run the pinned ART test for a technique; confirm it actually executed │
+ │  MetricsEngine      poll at T+2/5/10/15 min; record caught / latency / severity           │
+ │  SentinelClient     query Sentinel; match alerts to the technique (see Measurement)       │
+ │  KQLGenerator       for a miss, emit a candidate detection rule                            │
+ │  SQLite store       one row per technique per run                                          │
+ └──────────────────────────────────────────┬───────────────────────────────────────────────┘
+                                             ▼
+ ┌──────────────────────────────── Dashboard (React + D3.js + FastAPI) ─────────────────────┐
+ │  ATT&CK heatmap (colour = latency) · run history · remediation panel (gaps + generated KQL)│
+ └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+The lab is built entirely by Terraform in [`infra/`](infra/README.md), so anyone can reproduce it with one `terraform apply`. SentinelBench authenticates with the VM's managed identity (Log Analytics Reader), so no client secret exists in the project.
 
 ---
 
-## Techniques Covered in v1
+## Measurement: what counts as a detection
 
-SentinelBench v1 covers **15 techniques** across five ATT&CK v19 tactics, chosen for high prevalence in real incident investigations and high variance in Sentinel's default detection coverage.
+Matching a simulated technique to a real Sentinel detection is harder than it looks, and getting it wrong produces impressive-but-false numbers. These rules are what make the results trustworthy; several were added after an early run reported ~80% coverage that turned out to be measurement artifacts.
 
-Each technique is pinned to **one specific Atomic Red Team test by GUID** (`art_guid` in `core/simulation_runner.py`), so every run executes exactly the same procedure. Test numbers are not used: they shift between ART releases, and test #1 is often a Linux or macOS test that Invoke-AtomicTest silently skips on Windows. SentinelBench also checks ART's output to confirm a test actually executed, rather than trusting the exit code.
+- **Match the rule's declared ATT&CK mapping, never the captured event.** A detection counts for technique *X* only if the alert's `Techniques` column lists *X*. SentinelBench never extracts technique IDs from `ExtendedProperties` or entity text — those contain the triggering command line, and every technique is launched by a harness command that names it (`Invoke-AtomicTest T1552.001 …`), so reading them would credit a rule with "detecting" its own invocation.
+- **Breadth guard against catch-all rules.** Some Microsoft rules are mapped to dozens of techniques (the "Powershell Empire Cmdlets" rule is tagged with **51**). One such rule firing is a generic "suspicious toolkit" alert, not a specific detection, so an alert whose mapping lists more than a threshold number of techniques is ignored for attribution. Specific rules, and the single-technique rules SentinelBench generates, pass.
+- **Exact technique-ID match**, including the parent technique, never substring (`has "T1059"` would wrongly match `T1059.003`).
+- **Checkpoint-bounded polling.** Each poll considers only alerts created up to its own checkpoint, so a slow, paused, or resumed run can never backfill a late alert as an in-time detection.
+- **Host-scoped.** Alerts must name the lab host, so unrelated workspace activity is ignored.
+- **"Missed" means no qualifying rule fired — not "no telemetry."** The simulation's own events are confirmed present in the workspace, so a miss is a detection gap, not a plumbing failure.
+
+### Experiment design
+
+Benchmarking a brand-new workspace is uninteresting (it has no rules, so everything misses). SentinelBench compares configurations:
+
+- **Config A — control:** empty workspace, no analytics rules. Confirms the pipeline and establishes the floor (everything missed).
+- **Config B — built-in rules:** Microsoft's Windows Security Events analytics rules enabled at 5-minute frequency, to measure what the out-of-box detection *logic* catches, decoupled from Sentinel's default (hourly-to-daily) rule cadence.
+- **Config C — closed loop (planned):** SentinelBench generates rules for config B's gaps, deploys them, and re-measures to show the gaps close.
+
+---
+
+## Techniques covered
+
+SentinelBench v1 covers **15 techniques** across five ATT&CK v19 tactics, chosen for prevalence in real investigations and for variance in Sentinel's default coverage.
+
+Each technique is pinned to **one specific Atomic Red Team test by GUID** (`art_guid` in `core/simulation_runner.py`), so every run executes exactly the same procedure. Test *numbers* are not used: they shift between ART releases, and test #1 is often a Linux or macOS test that `Invoke-AtomicTest` silently skips on Windows. SentinelBench also checks ART's output to confirm a test actually executed, rather than trusting the exit code.
 
 Two notes on IDs:
-- SentinelBench uses **ATT&CK v19** IDs and tactics. v19 split the old Defense Evasion tactic (TA0005) into **Stealth** (TA0005) and **Defense Impairment** (TA0112), and revoked *Clear Windows Event Logs* (T1070.001 → T1685.005) and *Disable or Modify Tools* (T1562.001 → T1685). Sentinel analytics written before v19 still tag the old IDs, so alert matching accepts both.
-- Every upstream Windows test for T1110.001 needs Active Directory, so v1 uses a custom atomic in [`atomics/T1110.001`](atomics/T1110.001/T1110.001.yaml) that guesses passwords against a local account.
+- SentinelBench uses **ATT&CK v19** IDs and tactics. v19 split the old Defense Evasion tactic into **Stealth** (TA0005) and **Defense Impairment** (TA0112), and revoked *Clear Windows Event Logs* (T1070.001 → T1685.005) and *Disable or Modify Tools* (T1562.001 → T1685). Sentinel content written before v19 still tags the old IDs, so alert matching accepts both.
+- Every upstream Windows test for T1110.001 needs Active Directory, so v1 uses a custom atomic in [`atomics/T1110.001`](atomics/T1110.001/T1110.001.yaml) that generates failed logons against a standing local account via the `LogonUser` API.
 
-### Execution — 3 techniques
+| Tactic | Techniques |
+|---|---|
+| Execution | T1059.001 PowerShell · T1059.003 Windows Command Shell · T1569.002 Service Execution |
+| Persistence | T1547.001 Registry Run Keys · T1053.005 Scheduled Task · T1136.001 Create Local Account |
+| Credential Access | T1003.001 LSASS Memory · T1110.001 Brute Force · T1552.001 Credentials in Files · T1555.003 Browser Credentials · T1040 Network Sniffing |
+| Stealth | T1027 Obfuscated Files or Information |
+| Defense Impairment | T1685.005 Clear Event Logs · T1685 Disable/Modify Tools · T1112 Modify Registry |
 
-| ATT&CK ID | Technique | Why included |
-|-----------|-----------|--------------|
-| T1059.001 | PowerShell | Most common execution vector in enterprise environments; Sentinel's PowerShell alerting is highly configuration-dependent |
-| T1059.003 | Windows Command Shell | Baseline; validates event log ingestion is functioning correctly |
-| T1569.002 | Service Execution | Frequently used for persistence payloads; lower-profile than PowerShell in most rule sets |
-
-### Persistence — 3 techniques
-
-| ATT&CK ID | Technique | Why included |
-|-----------|-----------|--------------|
-| T1547.001 | Registry Run Keys / Startup Folder | Extremely common; many Sentinel environments have this rule but with high false-positive suppression that inadvertently hides real activity |
-| T1053.005 | Scheduled Task/Job | High-impact persistence mechanism with significant latency variation across Sentinel configurations |
-| T1136.001 | Create Local Account | Simple, high-signal technique; useful as a calibration baseline for the metrics engine |
-
-### Credential Access — 5 techniques
-
-| ATT&CK ID | Technique | Why included |
-|-----------|-----------|--------------|
-| T1003.001 | LSASS Memory | The highest-impact credential dumping technique; latency here has the most direct operational consequence |
-| T1110.001 | Brute Force — Password Guessing | Tests whether Sentinel's failed-login correlation is active and correctly thresholded (custom atomic, see above) |
-| T1552.001 | Credentials in Files | Tests file-access telemetry; frequently blind spot in Sentinel deployments without MDE integration |
-| T1555.003 | Credentials from Web Browsers | Low severity by default in most rule sets despite high attacker value; severity accuracy test |
-| T1040 | Network Sniffing | Tests whether network telemetry is flowing; often reveals gaps in log source configuration |
-
-### Stealth — 1 technique
-
-| ATT&CK ID | Technique | Why included |
-|-----------|-----------|--------------|
-| T1027 | Obfuscated Files or Information | Tests behaviour-based vs signature-based detection; reveals over-reliance on static rules |
-
-### Defense Impairment — 3 techniques
-
-| ATT&CK ID | Technique | Why included |
-|-----------|-----------|--------------|
-| T1685.005 | Clear Windows Event Logs (T1070.001 before v19) | Meta-technique: if an attacker runs this and Sentinel doesn't alert, all subsequent detections in that window are compromised |
-| T1685 | Disable or Modify Tools (T1562.001 before v19) | Tests whether tampering with Defender is detected |
-| T1112 | Modify Registry | High false-positive volume technique; useful for testing whether severity suppression is misconfigured |
+The suite runs defence-tampering techniques last (T1685 then T1685.005), so stopping Defender or clearing logs can't affect the measurement of any earlier technique.
 
 ---
 
-## Metrics Reference
+## Metrics reference
 
-### Detection Latency
+### Detection latency
 
-Latency is measured as the elapsed time in seconds between `timestamp_exec` (when the Atomic Red Team script triggers the technique) and `timestamp_alert` (when the first matching Sentinel incident or alert is created, as returned by the Log Analytics API).
+Elapsed seconds between `timestamp_exec` (taken immediately before the ART test executes, after prerequisites) and the creation time of the first qualifying alert. Polls run at T+2/5/10/15 min; nothing by the cutoff is a **miss**. The cutoff is configurable with `--max-wait` (e.g. `--max-wait 3` for a control run where every technique misses anyway).
 
-SentinelBench polls the API at four checkpoints: T+2min, T+5min, T+10min, and T+15min. If no alert is found by T+15min, the technique is recorded as **Missed**.
+| Latency | Band | Interpretation |
+|---|---|---|
+| < 3 min | Green | Operationally effective |
+| 3–10 min | Amber | Narrow response window |
+| > 10 min | Red | Unlikely to prevent attacker progress |
+| No alert | Missed | Detection gap — KQL suggestion generated |
 
-Latency thresholds used in the heatmap colour encoding:
+Latency includes Microsoft's ingestion lag (typically 1–3 min); interpret sub-5-minute values with that floor in mind.
 
-| Latency | Colour | Operational interpretation |
-|---------|--------|---------------------------|
-| < 3 minutes | Green | Detection is operationally effective |
-| 3–10 minutes | Amber | Detection exists but response window is narrow |
-| > 10 minutes | Red | Detection is present but unlikely to prevent attacker progress |
-| No alert | Dark red | Detection gap — KQL suggestion generated |
+### Severity accuracy
 
-### Severity Accuracy
+MITRE ATT&CK does not assign severities to techniques. The expected severity (`severity_expected` in `core/simulation_runner.py`) is SentinelBench's own rubric, based on a technique's position in an intrusion and its impact if missed. The tool compares Sentinel's assigned severity against that rubric, so severity results mean "does Sentinel agree with this rubric," not ground truth. A positive delta (Sentinel rated it lower than expected) is flagged as a miscalibration.
 
-MITRE ATT&CK does not assign severities to techniques. The expected severity for each technique (`severity_expected` in `core/simulation_runner.py`) is SentinelBench's own judgement, based on the technique's typical position in an intrusion and its impact if missed. SentinelBench compares the severity Sentinel assigned to the triggered alert against that expected value, so treat severity results as "does Sentinel agree with this rubric", not as ground truth.
+### KQL suggestions
 
-A **severity delta** of +1 or more (e.g., Sentinel fires *Low* for a technique with expected impact *High*) is flagged as a severity miscalibration and highlighted in the remediation panel alongside the KQL suggestion.
-
-### KQL Suggestion Quality
-
-Generated KQL rules are tagged with a confidence level:
-
-- **High confidence** — Rule is seeded directly from observed EventIDs and process names in the simulation window; low false-positive risk
-- **Medium confidence** — Rule uses technique-class heuristics; requires review before production deployment
-- **Requires tuning** — Template generated but relies on environment-specific data (e.g., username patterns, IP ranges); manual adjustment needed before use
-
-All generated rules include inline comments explaining the detection logic and a false-positive risk note.
+For a miss, SentinelBench emits a candidate rule tagged with a confidence level (`high` / `medium` / `requires_tuning`), its data source, and a false-positive note. Rules are currently per-technique templates; seeding them from the event data observed during the run (via `core/evidence.py`, which separates the technique's own processes from harness and background noise) is implemented for PowerShell and the generic fallback, with per-technique seeding in progress. Every generated rule is a starting point for a detection engineer, not a production rule.
 
 ---
 
 ## Setup
 
-The recommended path is the Terraform lab in [`infra/`](infra/README.md): one `terraform apply` builds the workspace, Sentinel, a monitored Windows VM with Sysmon and Atomic Red Team, and cost guardrails. SentinelBench on that VM authenticates with the VM's managed identity, so no client secret is needed. The manual setup below still works.
+The recommended path is the Terraform lab in [`infra/`](infra/README.md): one `terraform apply` builds the workspace, Sentinel onboarding, a monitored Windows VM with Sysmon and Atomic Red Team, and cost guardrails (ingestion cap, budget alerts, VM auto-shutdown). The lab README has the full run-through, including enabling config B's analytics rules.
 
-### Prerequisites
-
-- Windows 10/11 VM (isolated, no production network connectivity)
-- Microsoft Sentinel workspace with Log Analytics
-- An identity with the **Log Analytics Reader** role on the workspace (the VM managed identity, your own account via Azure CLI, or an app registration)
-- [Atomic Red Team](https://github.com/redcanaryco/atomic-red-team) installed on the lab VM
-- Python 3.10+
-- Node 18+ (for the dashboard)
-
-### Environment Variables
-
-See [`.env.example`](.env.example). `SENTINEL_AUTH` selects `managed_identity` (lab VM), `azure_cli` (your `az login` session) or `client_secret` (app registration).
-
-### Install & Run
+### Run
 
 ```bash
-# Clone the repo
-git clone https://github.com/DivyTR/sentinelbench
-cd sentinelbench
+# one technique (fast feedback)
+python sentinelbench.py --technique T1059.003
 
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Run a single technique test
-python sentinelbench.py --technique T1003.001
-
-# Run the full v1 suite (all 15 techniques)
+# the full 15-technique suite
 python sentinelbench.py --suite v1
 
-# Start the dashboard
+# a baseline/control run with a short cutoff (everything misses anyway)
+python sentinelbench.py --suite v1 --max-wait 3
+
+# review a run
+python sentinelbench.py --history 5
+python sentinelbench.py --run-id <id> --show-results
+python sentinelbench.py --run-id <id> --show-kql
+
+# dashboard
 cd dashboard && npm install && npm run dev
 ```
+
+`SENTINEL_AUTH` selects how the tool reaches Log Analytics: `managed_identity` (the lab VM), `azure_cli` (your `az login`), or `client_secret` (an app registration). See [`.env.example`](.env.example).
 
 ---
 
@@ -255,54 +180,45 @@ ruff check .
 pytest -q
 ```
 
-The test suite runs without Azure or Windows: the Log Analytics client, PowerShell and the clock are replaced with fakes. CI runs lint, tests and a dashboard build on every push.
+The test suite runs without Azure or Windows: the Log Analytics client, PowerShell, and the clock are replaced with fakes, so the matching logic, timing, and ATT&CK handling are all unit-tested (including regressions for each measurement bug found in real runs). CI runs lint, the Python tests, a dashboard build, and `terraform validate` on every push.
 
 ---
 
 ## Limitations
 
-These are not weaknesses to apologise for — they are the honest boundary conditions of v1. Understanding them is part of using the tool correctly.
+These are the honest boundary conditions of v1 — several discovered by running the tool and distrusting a result that looked too good.
 
-**1. Lab environment only — not production safe.**
-Atomic Red Team simulations write registry keys, create local accounts, attempt LSASS reads, and perform other actions that would be immediately disruptive in a production environment. SentinelBench is designed exclusively for isolated lab VMs. Running it against production infrastructure is outside its intended use and could cause genuine harm.
-
-**2. Sentinel ingestion lag is not isolated.**
-Latency measurements include Microsoft's own log ingestion pipeline, which adds a variable 1–3 minute lag between event generation and Log Analytics availability. This is labelled in all latency outputs and does not affect caught/missed accuracy, but means sub-5-minute latency measurements should be interpreted with awareness of this baseline.
-
-**3. KQL suggestions are starting points, not production rules.**
-Generated rules are seeded with real event data from your lab environment but are not hardened against false positives in a production environment. Every generated rule must be reviewed, tested, and tuned before deployment. SentinelBench deliberately labels rule confidence and flags tuning requirements — it is a detection engineering accelerator, not an autonomous rule deployer.
-
-**4. 15 techniques is not comprehensive coverage.**
-MITRE ATT&CK documents 600+ (sub-)techniques. SentinelBench v1 covers 15. It is a focused quality benchmark, not a full coverage audit. The techniques were selected for prevalence and detection variance, not completeness.
-
-**5. Windows-only in v1.**
-All simulations target Windows endpoints. Linux, macOS, and cloud-native attack paths (e.g., T1078.004 — Valid Accounts: Cloud Accounts) are out of scope for v1.
+1. **Lab only — not production safe.** ART simulations write registry keys, create accounts, attempt LSASS reads, and clear logs. Run only in an isolated lab you own.
+2. **Ingestion lag is included in latency.** Microsoft's pipeline adds a variable 1–3 min between event and query availability; it is a floor on measured latency, not a measurement error.
+3. **Logs-only deployment.** The lab collects Windows Security Events and Sysmon, not Defender XDR / MDE. Many built-in Sentinel rules require those connectors and therefore cannot fire here — which is itself a realistic finding about "Windows logs only" deployments, but it bounds what config B can detect.
+4. **Simulation fidelity shapes detectability.** A detection can miss because the rule is absent *or* because the simulation doesn't reproduce the exact signal the rule keys on. Known examples: the brute-force test generates 4625 (type 3) events via a local API call with **no source IP**, so rules that correlate failures per source IP do not fire; and T1136.001's account is removed by ART's own cleanup, so whether a "created-and-deleted-within-10-min" rule catches it depends on cleanup timing rather than the creation itself. Both are documented per run.
+5. **Severity is a rubric, not ground truth** (see Metrics).
+6. **Defender may pre-empt a technique.** Real-time protection can block e.g. the LSASS dump before it completes, changing what telemetry (and which detection) is possible.
+7. **15 techniques, Windows only.** A focused quality benchmark, not a coverage audit; Linux/macOS/cloud are out of scope for v1.
 
 ---
 
 ## Roadmap
 
 | Version | Focus |
-|---------|-------|
-| **v1 (current)** | 15 Windows techniques · Sentinel integration · Latency + severity metrics · KQL suggestions for missed detections · ATT&CK heatmap dashboard |
-| **v2** | Expand to 50 techniques · Add Linux endpoint support · Severity calibration scoring across full run history · Multi-run trend analysis (is coverage improving over time?) |
-| **v3** | LLM-assisted KQL rule improvement · Natural language explanation of each detection gap for non-technical stakeholders · Export to PDF report |
+|---|---|
+| **v1 (current)** | 15 Windows techniques · reproducible Terraform lab · correct measurement engine with integrity guards · config A/B experiment · KQL suggestions for gaps · heatmap dashboard |
+| **v2** | Config C closed loop (generate → deploy → re-measure) · event-seeded KQL for all techniques · repeated runs with variance · published results and methodology write-up |
+| **v3** | Expand technique set and tactics · Linux endpoint support · multi-run trend analysis · PDF/stakeholder reporting |
 
 ---
 
-## Why I Built This
+## Why I built this
 
-I work as a SOC Analyst at TCS, monitoring enterprise environments daily using Microsoft Sentinel and Defender XDR. The question I kept returning to was simple: *the rules are deployed, but how do I know they actually work?*
+I work as a SOC Analyst at TCS, monitoring enterprise environments with Microsoft Sentinel and Defender XDR. The question I kept returning to was simple: *the rules are deployed, but how do I know they actually work?*
 
-Most validation in real SOC environments is reactive — you discover a rule was broken or misconfigured after a real incident surfaces the gap. SentinelBench is my attempt to make that validation proactive, evidence-based, and repeatable.
-
-The latency and severity accuracy dimensions emerged from direct incident response experience: two incidents where detections fired, but either too late or at too low a severity to drive the right response. Both outcomes look like working security from the outside. Neither contained the threat.
+Most validation in real SOCs is reactive — you find a broken or misconfigured rule after an incident surfaces the gap. SentinelBench is my attempt to make that validation proactive, evidence-based, and repeatable. The latency and severity dimensions came from direct incident response: detections that fired, but too late or too quietly to drive the right response. Both look like working security from the outside. Neither contained the threat.
 
 ---
 
 ## Author
 
-**Divyansh Tripathi** — Cyber Security Analyst · TCS · PJPT Certified  
+**Divyansh Tripathi** — Cyber Security Analyst · TCS · PJPT Certified
 [linkedin.com/in/divyansh-tripathi](https://linkedin.com/in/divyansh-tripathi) · [github.com/DivyTR](https://github.com/DivyTR)
 
 ---
@@ -311,4 +227,4 @@ The latency and severity accuracy dimensions emerged from direct incident respon
 
 MIT License — see [LICENSE](LICENSE) for details.
 
-> **Responsible use**: SentinelBench is designed for use in isolated lab environments against infrastructure you own and are authorised to test. Never run attack simulations against systems you do not own or have explicit written permission to test.
+> **Responsible use**: SentinelBench is for use in isolated lab environments against infrastructure you own and are authorised to test. Never run attack simulations against systems you do not own or have explicit written permission to test.
