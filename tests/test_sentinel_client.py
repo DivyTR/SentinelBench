@@ -57,6 +57,10 @@ def test_alert_query_matches_exact_ids_from_techniques_column():
     # one broadly-firing rule as a detection for a dozen techniques. Match the
     # rule's declared Techniques only.
     assert "ExtendedProperties" not in kql
+    # Breadth guard: a rule tagged with dozens of techniques (e.g. the Empire
+    # cmdlet rule, 51 techniques) is a catch-all, not a per-technique
+    # detection, and must be ignored for attribution.
+    assert "array_length(AttackIds) <= 8" in kql
     assert "summarize arg_min(TimeGenerated, *) by SystemAlertId" in kql
     assert timespan == "2026-10-03T10:00:00.000000Z/2026-10-03T10:05:00.000000Z"
 
@@ -168,3 +172,12 @@ def test_azure_cli_missing_gives_clear_error(monkeypatch):
     monkeypatch.setattr(sc.shutil, "which", lambda name: None)
     with pytest.raises(sc.SentinelClientError, match="not on PATH"):
         sc.SentinelClient(auth="azure_cli").get_token()
+
+
+
+def test_breadth_guard_threshold_is_configurable():
+    from core import sentinel_client as _sc
+    assert _sc.MAX_ALERT_TECHNIQUES == 8
+    client = RecordingClient()
+    client.check_alert_for_technique(["T1040"], T0, T0 + timedelta(minutes=5), max_techniques=3)
+    assert "array_length(AttackIds) <= 3" in client.calls[0][0]

@@ -49,6 +49,10 @@ QUERY_URL_TEMPLATE = (
 
 AUTH_MODES = ("managed_identity", "azure_cli", "client_secret")
 
+# A Sentinel rule mapped to more ATT&CK techniques than this is treated as a
+# generic catch-all, not a per-technique detection (see check_alert_for_technique).
+MAX_ALERT_TECHNIQUES = 8
+
 
 class SentinelClientError(Exception):
     pass
@@ -211,10 +215,12 @@ class SentinelClient:
         since: datetime,
         until: datetime,
         host: str | None = None,
+        max_techniques: int = MAX_ALERT_TECHNIQUES,
     ) -> dict | None:
         """
         Return the earliest Sentinel alert created in [since, until] that is
-        tagged with one of `match_ids`, or None.
+        tagged with one of `match_ids` and is specific enough to attribute, or
+        None.
 
         How matching works
         ------------------
@@ -228,10 +234,20 @@ class SentinelClient:
         carries the raw event that triggered the rule. Those fields contain the
         offending command line, and SentinelBench launches every technique with
         a harness command that names the technique ("Invoke-AtomicTest
-        T1552.001 ..."). Extracting IDs from that text matched a technique to
-        its own harness invocation, so a single broadly-firing rule was
-        credited as a detection for a dozen unrelated techniques. Matching only
-        the rule's declared Techniques removes that false attribution.
+        T1552.001 ..."), so extracting IDs from that text matched a technique to
+        its own harness invocation.
+
+        Breadth guard
+        -------------
+        Some Microsoft rules are mapped to dozens of ATT&CK techniques because
+        the toolkit they detect is multi-purpose. The "Powershell Empire
+        Cmdlets" rule, for instance, is tagged with 51 techniques, nearly the
+        whole suite. Such a rule firing is a generic "suspicious toolkit" alert,
+        not a specific detection of any one technique, and crediting it to all
+        51 produced 12/15 fake catches. So an alert whose mapping lists more
+        than `max_techniques` IDs is ignored for attribution. Rules that target
+        a technique specifically (log-clearing is tagged with ~1 technique, and
+        the rules SentinelBench generates with exactly 1) pass the guard.
 
         If `host` is given, the alert must name it in CompromisedEntity or
         Entities, so alerts from other machines in the workspace are ignored.
@@ -254,11 +270,12 @@ SecurityAlert
 | where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
 | extend IngestedAt = ingestion_time()
 | extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)", tostring(Techniques))
+| where array_length(AttackIds) <= {max_techniques}
 | extend MatchedIds = set_intersect(AttackIds, {ids})
 | where array_length(MatchedIds) > 0
 {host_filter}| summarize arg_min(TimeGenerated, *) by SystemAlertId
 | project TimeGenerated, IngestedAt, StartTime, AlertName, AlertSeverity,
-          ProviderName, CompromisedEntity, MatchedIds, SystemAlertId
+          ProviderName, CompromisedEntity, MatchedIds, AttackIds, SystemAlertId
 | order by TimeGenerated asc
 | take 1
 """
@@ -275,6 +292,7 @@ SecurityIncident
 | where CreatedTime between (datetime({since_str}) .. datetime({until_str}))
 | extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)",
                                  tostring(parse_json(tostring(AdditionalData)).techniques))
+| where array_length(AttackIds) <= {max_techniques}
 | extend MatchedIds = set_intersect(AttackIds, {ids})
 | where array_length(MatchedIds) > 0
 | summarize arg_min(CreatedTime, *) by IncidentNumber
