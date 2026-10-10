@@ -139,7 +139,7 @@ MITRE ATT&CK does not assign severities to techniques. The expected severity (`s
 
 ### KQL suggestions
 
-For a miss, SentinelBench emits a candidate rule tagged with a confidence level (`high` / `medium` / `requires_tuning`), its data source, and a false-positive note. Rules are currently per-technique templates; seeding them from the event data observed during the run (via `core/evidence.py`, which separates the technique's own processes from harness and background noise) is implemented for PowerShell and the generic fallback, with per-technique seeding in progress. Every generated rule is a starting point for a detection engineer, not a production rule.
+For a miss, SentinelBench emits a candidate rule tagged with a confidence level (`high` / `medium` / `requires_tuning`), its data source, and a false-positive note. Each rule is a *behavioral* detection template — keyed on the EventID and structural pattern of the technique — and is *grounded* in the run's telemetry: the processes and events actually observed (isolated from the Invoke-AtomicTest harness by `core/evidence.py`) are cited in a leading comment so an analyst can see what the rule targets. They are deliberately **not** seeded into the detection logic. In a controlled Atomic Red Team lab the observed artifacts — ART's test service/task/account names, benign `echo` command lines, processes parented to the test harness — are synthetic, so pasting them into a rule would overfit it to the lab rather than catch real tradecraft. Every generated rule is a starting point for a detection engineer, not a production rule.
 
 ---
 
@@ -203,7 +203,7 @@ These are the honest boundary conditions of v1 — several discovered by running
 | Version | Focus |
 |---|---|
 | **v1 (current)** | 15 Windows techniques · reproducible Terraform lab · correct measurement engine with integrity guards · config A/B experiment · KQL suggestions for gaps · heatmap dashboard |
-| **v2** | Config C closed loop (generate → deploy → re-measure) · event-seeded KQL for all techniques · repeated runs with variance · published results and methodology write-up |
+| **v2** | Config C closed loop (generate → deploy → re-measure) · richer per-technique behavioral templates · repeated runs with variance · published results and methodology write-up |
 | **v3** | Expand technique set and tactics · Linux endpoint support · multi-run trend analysis · PDF/stakeholder reporting |
 
 ---
