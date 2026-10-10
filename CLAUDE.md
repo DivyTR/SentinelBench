@@ -122,8 +122,18 @@ makes the caught count jump, suspect a regression here first.
 - Measurement integrity: **done** (commits through `15ce396`). The ~2/15 honest
   result was validated by a manual cross-check query.
 - README rewrite to match reality: **done** (`4ceeceb`).
-- Evidence-lineage wiring into the pipeline: **done** (`063719b`), 127 tests
-  pass, verified end-to-end (attributed rows reach the KQL generator first).
+- Evidence-lineage wiring into the pipeline: **infrastructure done** (`063719b`),
+  127 tests pass. Verified on live Sentinel (smoke test, run 5f8b3244):
+  `collect_evidence` runs without error and attributed rows reach the
+  generators. **BUT only 2/10 generators consume them** — `_gen_T1059_001`
+  (PowerShell) and `_generic_generator` use `_extract_field`; the other 8
+  per-technique generators (T1059.003, T1569.002, T1547.001, T1053.005,
+  T1136.001, T1003.001, T1110.001, T1685.005) emit sound but **static**
+  behavioral templates that ignore `raw_logs`. So "rules seeded from real
+  telemetry" is true for a subset, not all. Widening consumption is config-C
+  work and can be applied **retroactively** to a run's stored `raw_logs`
+  (no VM re-run needed). The README already states this honestly
+  ("per-technique seeding in progress").
 - **Clean config B re-run with the current tool: NOT done.** This is the
   immediate next action. It produces correct per-technique catches/latencies
   and the KQL suggestions for the gaps, which are config C's input.
@@ -142,10 +152,14 @@ makes the caught count jump, suspect a regression here first.
    `python sentinelbench.py --suite v1 --notes "config B, evidence wiring"`.
 3. **(together)** Analyze results (expect ~2–3/15); confirm which rules fired
    and why.
-4. **(Claude, parallel to the run)** Build the config C rule deployer:
-   ARM REST `Microsoft.SecurityInsights/alertRules` (new token scope vs. the
-   query API), dry-run-able, with alert suppression, `[SB-C]` tagging. Tests,
-   no VM needed until deploy.
+4. **(Claude, parallel to the run)** Two pure-Python, no-VM tasks, either order:
+   (a) Build the config C rule deployer: ARM REST
+   `Microsoft.SecurityInsights/alertRules` (new token scope vs. the query API),
+   dry-run-able, with alert suppression, `[SB-C]` tagging, tests.
+   (b) Widen evidence consumption beyond the 2/10 generators so more rules are
+   actually seeded from `raw_logs` (apply retroactively to the config B run's
+   stored evidence). (b) directly strengthens the headline claim; (a) is the
+   bigger vaporware→real lever.
 5. **(together)** Config C: deploy generated rules for the gaps, re-measure,
    show gaps close, produce the A/B/C comparison and a results write-up.
 6. **Later:** resume-bullet rewrite; decide whether this CLAUDE.md is kept when
