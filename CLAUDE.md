@@ -141,12 +141,30 @@ makes the caught count jump, suspect a regression here first.
   miscalibration finding)**. T1136.001 (account create/delete) MISSED this
   run where earlier analysis expected it; consistent with the documented
   cleanup/cadence timing sensitivity — run-to-run variance on a marginal
-  detection. **NOT yet independently verified:** a `SecurityAlert |
-  where TimeGenerated > ago(6h)` cross-check (from laptop az) is owed, to
-  confirm the tool isn't UNDER-crediting (e.g. an alert fired >15min after
-  exec, or a Techniques tag the matcher missed). Apply the same distrust to
-  the low number as to the old false 12/15. KQL suggestions for the 14 gaps
-  are stored in the run; they are config C's input.
+  detection. **VERIFIED** by a `SecurityAlert | ago(6h)` cross-check:
+  exactly three rules fired in the window and the matcher handled each
+  correctly — (1) "Security Event log cleared" [T1070] → credited to
+  T1685.005 (T1070 is its pre-v19 lineage, in match_ids), the 1 catch;
+  (2) "Powershell Empire Cmdlets" [51 techniques] → excluded by breadth
+  guard; (3) "User account created and deleted" [**T1098, T1078**] → NOT
+  credited to T1136.001, because it declares account-manipulation/valid-
+  account techniques, not T1136 or its lineage. No under-crediting bug;
+  1/15 stands.
+  **Finding (tag mismatch):** T1136.001's account activity DID trigger a
+  rule, but tagged T1098/T1078 — so the activity was detected yet
+  mis-attributed by technique. "Did an alert fire?" (yes, loose) vs "does
+  Sentinel have T1136.001-mapped coverage?" (no) are different questions;
+  this project measures the latter. Belongs in the write-up. Do NOT add
+  T1098/T1078 to T1136's match_ids — that reintroduces the fuzzy matching
+  the breadth guard/Techniques-only fix removed.
+  **Open (minor):** the account alerts cluster at 6:51–7:01 PM but T1136.001
+  ran ~3h earlier (tech 4/15); couldn't map them to exec time from
+  timestamps alone. Either a very-late detection or unrelated churn; doesn't
+  change 1/15. `--show-results` prints per-technique exec times if we want
+  the chain.
+  **Headline:** ~12/15 techniques triggered NO alert at all in a Windows-
+  logs-only deployment. KQL suggestions for the gaps are stored in the run;
+  they are config C's input.
 - Config C deployer: **not built.**
 - Alert suppression (rules re-fired ~170× across a run): **not done**; fold
   into the config C deployer (scheduled-rule `suppressionDuration`).
