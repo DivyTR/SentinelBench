@@ -134,9 +134,19 @@ makes the caught count jump, suspect a regression here first.
   work and can be applied **retroactively** to a run's stored `raw_logs`
   (no VM re-run needed). The README already states this honestly
   ("per-technique seeding in progress").
-- **Clean config B re-run with the current tool: NOT done.** This is the
-  immediate next action. It produces correct per-technique catches/latencies
-  and the KQL suggestions for the gaps, which are config C's input.
+- **Clean config B re-run with the current tool: DONE** (run `c5ba877d`,
+  2026-10-10, 15/15 executed clean on commit `97f3faa`). Result: **1/15
+  caught (6.7%)**. The one catch: T1685.005 Clear Event Logs — caught at
+  T+10min, alert created at T+189s, severity **Medium (expected High →
+  miscalibration finding)**. T1136.001 (account create/delete) MISSED this
+  run where earlier analysis expected it; consistent with the documented
+  cleanup/cadence timing sensitivity — run-to-run variance on a marginal
+  detection. **NOT yet independently verified:** a `SecurityAlert |
+  where TimeGenerated > ago(6h)` cross-check (from laptop az) is owed, to
+  confirm the tool isn't UNDER-crediting (e.g. an alert fired >15min after
+  exec, or a Techniques tag the matcher missed). Apply the same distrust to
+  the low number as to the old false 12/15. KQL suggestions for the 14 gaps
+  are stored in the run; they are config C's input.
 - Config C deployer: **not built.**
 - Alert suppression (rules re-fired ~170× across a run): **not done**; fold
   into the config C deployer (scheduled-rule `suppressionDuration`).
