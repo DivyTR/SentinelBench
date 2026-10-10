@@ -118,6 +118,11 @@ makes the caught count jump, suspect a regression here first.
   the Log Analytics query CLI needs the **GUID**, not the workspace name.
 - Start/stop: `az vm start -g rg-sbench-lab -n vm-sbench` /
   `az vm deallocate -g rg-sbench-lab -n vm-sbench`.
+- **Auto-shutdown drift:** the shutdown time lives in terraform
+  (`auto_shutdown_time`, default `2300` IST). The user changed it to `0300` in
+  the portal, which terraform does not know — so `terraform apply` reverts it
+  to 2300. To keep 3am, set `auto_shutdown_time = "0300"` in the local tfvars
+  before applying.
 - On the VM, SentinelBench runs under **managed identity** — no stored
   credentials. **Never paste secrets (admin passwords, tokens) into chat.**
 - **The VM has no git, and `C:\SentinelBench\app` is a ZIP extract, not a
