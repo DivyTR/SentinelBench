@@ -115,6 +115,21 @@ def build_parser() -> argparse.ArgumentParser:
              "(default 15). Use a small value (e.g. 3) for a baseline run "
              "with no detection rules, where every technique is missed.",
     )
+    p.add_argument(
+        "--deploy-config-c", action="store_true",
+        help="Deploy generated [SB-C] analytics rules for a run's gaps "
+             "(use with --run-id). Previews unless --apply is given.",
+    )
+    p.add_argument(
+        "--teardown-config-c", action="store_true",
+        help="Remove all [SB-C] analytics rules from the workspace. "
+             "Previews unless --apply is given.",
+    )
+    p.add_argument(
+        "--apply", action="store_true",
+        help="With --deploy-config-c / --teardown-config-c, actually write to "
+             "Sentinel instead of previewing (preview is the default).",
+    )
     return p
 
 
@@ -162,6 +177,17 @@ def main() -> None:
 
     if args.show_kql and args.run_id:
         _print_kql(args.run_id)
+        sys.exit(0)
+
+    if args.deploy_config_c:
+        if not args.run_id:
+            print("[error] --deploy-config-c requires --run-id <run>")
+            sys.exit(1)
+        _deploy_config_c(args.run_id, apply=args.apply)
+        sys.exit(0)
+
+    if args.teardown_config_c:
+        _teardown_config_c(apply=args.apply)
         sys.exit(0)
 
     # ── benchmark modes ────────────────────────────────────────────────────────
@@ -380,6 +406,53 @@ def _print_kql(run_id: str) -> None:
         print(f"  Confidence: {s['confidence']}")
         print(f"  FP note   : {s['false_positive_note']}")
         print(f"\n{s['kql_query']}\n")
+
+
+def _deploy_config_c(run_id: str, apply: bool) -> None:
+    """Deploy (or preview) [SB-C] rules for a run's gaps — config C's deploy step."""
+    from core.rule_deployer import RuleDeployer, RuleDeployerError
+    mode = "APPLY" if apply else "PREVIEW (dry-run)"
+    print(f"\n[config-c] Deploying rules for run {run_id[:8]}...  mode: {mode}")
+    try:
+        report = RuleDeployer().deploy_run(run_id, dry_run=not apply)
+    except RuleDeployerError as exc:
+        print(f"[error] {exc}")
+        print("[hint] Needs SENTINEL_SUBSCRIPTION_ID, SENTINEL_RESOURCE_GROUP, "
+              "SENTINEL_WORKSPACE_NAME, and the identity must hold the "
+              "'Microsoft Sentinel Contributor' role (not just Reader).")
+        sys.exit(1)
+    if not report:
+        print("[config-c] No suggestions to deploy (all techniques caught, or none stored).")
+        return
+    for r in report:
+        if r["action"] == "skipped":
+            print(f"  {r['technique_id']:<14} skipped ({r['reason']})")
+        elif r["action"] == "dry_run":
+            print(f"  {r['technique_id']:<14} would PUT {r['payload']['properties']['displayName']}")
+        else:
+            print(f"  {r['technique_id']:<14} deployed [{r['status_code']}] {r['displayName']}")
+    if not apply:
+        print("\n[config-c] Preview only. Re-run with --apply to write these rules to Sentinel.")
+
+
+def _teardown_config_c(apply: bool) -> None:
+    """Remove (or preview removal of) all [SB-C] rules."""
+    from core.rule_deployer import RuleDeployer, RuleDeployerError
+    mode = "APPLY" if apply else "PREVIEW (dry-run)"
+    print(f"\n[config-c] Teardown of [SB-C] rules  mode: {mode}")
+    try:
+        report = RuleDeployer().teardown(dry_run=not apply)
+    except RuleDeployerError as exc:
+        print(f"[error] {exc}")
+        sys.exit(1)
+    if not report:
+        print("[config-c] No [SB-C] rules found in the workspace.")
+        return
+    for r in report:
+        verb = "would delete" if r["action"] == "dry_run" else f"deleted [{r['status_code']}]"
+        print(f"  {verb}  {r['displayName']}")
+    if not apply:
+        print("\n[config-c] Preview only. Re-run with --apply to delete these rules.")
 
 
 if __name__ == "__main__":

@@ -68,6 +68,15 @@ makes the caught count jump, suspect a regression here first.
   via `_evidence_grounding`) but deliberately NOT seeded into detection logic
   — ART's lab artifacts (test service/task/account names, harness-parented
   processes) would overfit the rule. Decision recorded 2026-10-10 ("option A").
+- `core/rule_deployer.py` — config C **deploy** step. Pushes generated rules
+  into Sentinel as `[SB-C]` scheduled analytics rules via the **ARM** API
+  (`management.azure.com` — a different token audience, and the workspace's ARM
+  path: subscription/RG/**name**, not the query GUID). Dry-run by default;
+  `deploy_run(run_id)`, `teardown()`, `list_sb_rules()`. Suppression baked in
+  (`suppressionDuration PT5H`) → fixes the ~170× re-fire. CLI:
+  `--deploy-config-c --run-id <id> [--apply]`, `--teardown-config-c [--apply]`
+  (preview unless `--apply`). Self-contained ARM auth (deliberate copy of the
+  3 modes, not shared with SentinelClient).
 - `core/db.py` — SQLite results storage.
 - `infra/terraform/` — lab IaC (resource group, VNet, Windows VM, Log Analytics
   workspace, DCRs, optional Sentinel onboarding gated on `enable_sentinel`).
@@ -168,9 +177,20 @@ makes the caught count jump, suspect a regression here first.
   **Headline:** ~12/15 techniques triggered NO alert at all in a Windows-
   logs-only deployment. KQL suggestions for the gaps are stored in the run;
   they are config C's input.
-- Config C deployer: **not built.**
-- Alert suppression (rules re-fired ~170× across a run): **not done**; fold
-  into the config C deployer (scheduled-rule `suppressionDuration`).
+- Config C deployer: **built** (`core/rule_deployer.py`, 142 tests pass,
+  dry-run exercised) but **NOT yet run against live ARM**. Prerequisites for a
+  live config C run, none done yet:
+  1. Grant the VM identity **Microsoft Sentinel Contributor** on the workspace/
+     RG (terraform change + apply — today it holds Log Analytics Reader only,
+     so live deploys will 403).
+  2. Add `SENTINEL_SUBSCRIPTION_ID` / `SENTINEL_RESOURCE_GROUP` /
+     `SENTINEL_WORKSPACE_NAME` to the VM `.env` (bootstrap doesn't write them).
+  3. Open question to validate on first live deploy: do v19 technique IDs
+     (e.g. T1685) pass ARM's `techniques` enum? If not, deploy with
+     `include_attack_mapping=False` and have the config C re-run match `[SB-C]`
+     rules by display-name prefix instead of the Techniques column.
+- Alert suppression (~170× re-fire): **done** — baked into the deployer
+  (`suppressionDuration PT5H`, `suppressionEnabled`).
 
 ## Next
 
@@ -183,14 +203,16 @@ makes the caught count jump, suspect a regression here first.
    `python sentinelbench.py --suite v1 --notes "config B, evidence wiring"`.
 3. **(together)** Analyze results (expect ~2–3/15); confirm which rules fired
    and why.
-4. **(Claude) Build the config C rule deployer** — the headline, biggest
-   remaining piece: ARM REST `Microsoft.SecurityInsights/alertRules` (new token
-   scope vs. the query API), dry-run-able, with alert suppression
-   (`suppressionDuration`, fixes the ~170× re-fire), `[SB-C]` tagging, tests.
-   Pure Python, no VM to build; needs a design-alignment on the ARM auth scope
-   first. (Generator evidence policy is settled — see Status "option A".)
-5. **(together)** Config C: deploy generated rules for the gaps, re-measure,
-   show gaps close, produce the A/B/C comparison and a results write-up.
+4. **Config C deployer: DONE** (`core/rule_deployer.py` + CLI). Next is the
+   **live config C run**, which needs the three prerequisites in Status above:
+   (a) terraform: grant the VM identity Microsoft Sentinel Contributor + apply;
+   (b) add the 3 ARM env vars to the VM `.env`;
+   (c) `python sentinelbench.py --deploy-config-c --run-id c5ba877d` (preview),
+   then `--apply`; verify in portal; then re-run the suite and measure whether
+   the `[SB-C]` rules close the gaps. Tear down with `--teardown-config-c
+   --apply` afterwards.
+5. **(together)** Config C analysis: show gaps close, A/B/C comparison, results
+   write-up. Also run a labeled config A (control) + one B repeat (variance).
 6. **Later:** resume-bullet rewrite; decide whether this CLAUDE.md is kept when
    the branch is merged to main (it's working memory, not necessarily a
    shipped artifact).
