@@ -111,6 +111,7 @@ class MetricsEngine:
         match_ids: list[str],
         severity_expected: str,
         exec_time: datetime,
+        art_guid: str | None = None,
     ) -> dict:
         """
         Poll Sentinel at each checkpoint until an alert is found or
@@ -172,8 +173,8 @@ class MetricsEngine:
                 )
 
                 # Fetch raw logs for KQL seeding (best-effort)
-                raw_logs = _safe_fetch_logs(
-                    self.client, technique_id, exec_time, self.host
+                raw_logs = _safe_collect_evidence(
+                    self.client, technique_id, art_guid, exec_time, self.host
                 )
 
                 return {
@@ -192,7 +193,9 @@ class MetricsEngine:
         # All checkpoints exhausted — missed detection
         print(f"    [obs] MISSED - no alert found within {self.checkpoints[-1]} minutes")
 
-        raw_logs = _safe_fetch_logs(self.client, technique_id, exec_time, self.host)
+        raw_logs = _safe_collect_evidence(
+            self.client, technique_id, art_guid, exec_time, self.host
+        )
 
         return {
             "caught":            False,
@@ -267,22 +270,31 @@ def _extract_severity(alert_row: dict) -> str | None:
     return raw.strip().title() if raw else None
 
 
-def _safe_fetch_logs(
+def _safe_collect_evidence(
     client: SentinelClient,
     technique_id: str,
+    art_guid: str | None,
     exec_time: datetime,
     host: str | None = None,
 ) -> list[dict]:
     """
-    Fetch raw event logs for KQL seeding.  Best-effort: a query or network
-    failure here must not lose the caught/missed measurement, so it degrades
-    to an empty list.  Programming errors still propagate.
+    Collect the technique's own telemetry for KQL seeding, isolated from the
+    ART harness by process lineage (see core/sentinel_client.collect_evidence).
+
+    Returns a flat list of rows for the KQL generator: the technique's
+    attributed processes first (so the generator seeds from, say, pktmon.exe
+    rather than the Invoke-AtomicTest wrapper), followed by technique-specific
+    events. Falls back to the unattributed processes when no launcher was
+    found. Best-effort: a query or network failure degrades to an empty list;
+    programming errors still propagate.
     """
     try:
-        return client.fetch_raw_logs(technique_id, exec_time, window_minutes=5, host=host)
+        ev = client.collect_evidence(technique_id, art_guid, exec_time, host=host)
     except (SentinelClientError, requests.RequestException, ValueError) as exc:
-        print(f"    [obs] Warning: could not fetch raw logs - {exc}")
+        print(f"    [obs] Warning: could not collect evidence - {exc}")
         return []
+    primary = ev.get("technique") or ev.get("unattributed") or []
+    return primary + (ev.get("technique_events") or [])
 
 
 def _dry_run_measurement(technique_id: str, severity_expected: str) -> dict:

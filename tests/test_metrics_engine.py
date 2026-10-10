@@ -42,6 +42,10 @@ class FakeClient:
     def fetch_raw_logs(self, technique_id, exec_time, window_minutes=5, host=None):
         return [{"EventID": 4688}]
 
+    def collect_evidence(self, technique_id, art_guid, exec_time, host=None, window_minutes=5):
+        return {"attribution": "lineage", "technique": [{"EventID": 4688}],
+                "technique_events": [], "unattributed": []}
+
 
 def _engine(clock, client):
     return MetricsEngine(client, host="sb-lab", clock=clock, sleep=clock.sleep)

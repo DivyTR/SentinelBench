@@ -33,6 +33,8 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from .evidence import attribute_processes
+
 # ── token cache (in-memory, per-process, per auth mode) ──────────────────────
 
 _token_cache: dict = {}
@@ -354,6 +356,84 @@ SecurityIncident
 | take 20
 """
         return self.query(kql, timespan=f"{since_str}/{until_str}")
+
+    def collect_evidence(
+        self,
+        technique_id: str,
+        art_guid: str | None,
+        exec_time: datetime,
+        host: str | None = None,
+        window_minutes: int = 5,
+    ) -> dict:
+        """
+        Gather the telemetry this technique produced, separated from the ART
+        harness and from unrelated background activity (see core/evidence.py).
+
+        1. All 4688 process creations in the window, attributed by process
+           lineage from the execution step's launcher, so the technique's own
+           processes (e.g. pktmon.exe, findstr.exe) are isolated from the
+           Invoke-AtomicTest wrapper and from Edge/WMI/telemetry noise.
+        2. The technique's hinted non-4688 events (registry, service install,
+           task creation, account creation, log clear, failed logon), which are
+           specific by EventID so host-scoping is enough.
+
+        Returns the attribute_processes() dict plus "technique_events".
+        """
+        since = exec_time - timedelta(seconds=5)
+        until = _add_minutes(exec_time, window_minutes)
+        since_str, until_str = _kql_datetime(since), _kql_datetime(until)
+        timespan = f"{since_str}/{until_str}"
+        host_filter = f'| where Computer startswith "{_validate_host(host)}"\n' if host else ""
+
+        processes = self.query(f"""
+SecurityEvent
+| where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| where EventID == 4688
+{host_filter}| project TimeGenerated, EventID, Computer, SubjectUserName,
+          Process = NewProcessName, NewProcessName, NewProcessId, ProcessId,
+          ParentProcessName, CommandLine
+| order by TimeGenerated asc
+| take 500
+""", timespan=timespan)
+        evidence = attribute_processes(processes, art_guid)
+
+        hints = TECHNIQUE_EVENT_HINTS.get(technique_id, {})
+        table = hints.get("table", "SecurityEvent")
+        event_ids = [
+            e for e in hints.get("event_ids", [])
+            if not (table == "SecurityEvent" and e == 4688)
+        ]
+        technique_events: list[dict] = []
+        if event_ids:
+            id_filter = " or ".join(f"EventID == {e}" for e in event_ids)
+            if table == "Event":
+                technique_events = self.query(f"""
+Event
+| where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| where Source == "Microsoft-Windows-Sysmon"
+| where {id_filter}
+{host_filter}| extend P = parse_xml(EventData)
+| project TimeGenerated, EventID, Computer,
+          Process      = tostring(P.DataItem.Image),
+          CommandLine  = tostring(P.DataItem.CommandLine),
+          TargetObject = tostring(P.DataItem.TargetObject),
+          Details      = tostring(P.DataItem.Details)
+| order by TimeGenerated asc
+| take 50
+""", timespan=timespan)
+            else:
+                technique_events = self.query(f"""
+SecurityEvent
+| where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| where {id_filter}
+{host_filter}| project TimeGenerated, EventID, Computer, Account, Process, CommandLine,
+          ParentProcessName, SubjectUserName, TargetUserName
+| order by TimeGenerated asc
+| take 50
+""", timespan=timespan)
+
+        evidence["technique_events"] = technique_events
+        return evidence
 
     def test_connection(self) -> bool:
         """

@@ -252,11 +252,12 @@ def main() -> None:
             match_ids=meta["match_ids"],
             severity_expected=meta["severity_expected"],
             exec_time=exec_time,
+            art_guid=meta["art_guid"],
         )
 
         # 3. Persist result
         raw_log_json = (
-            json.dumps(measurement["raw_logs"][:5])
+            json.dumps(measurement["raw_logs"][:10])
             if measurement["raw_logs"]
             else None
         )

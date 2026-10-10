@@ -96,6 +96,47 @@ def test_raw_log_query_uses_sysmon_source_for_event_table():
     assert 'Computer startswith "sb-lab"' in kql
 
 
+# ── evidence collection (process lineage + technique events) ─────────────────────
+
+GUID = "2a0a08a4-1f45-4089-984d-656e7764f699"
+
+
+def _proc(image, pid, ppid, cmd=""):
+    return {"TimeGenerated": "2026-10-03T10:00:01Z", "NewProcessName": image,
+            "NewProcessId": pid, "ProcessId": ppid, "CommandLine": cmd}
+
+
+def test_collect_evidence_for_4688_only_technique_runs_one_query_and_attributes():
+    # T1059.003 hints only 4688, so there is no separate technique-events query.
+    launcher = _proc("powershell.exe", "0x100", "0x50",
+                     f"Invoke-AtomicTest T1059.003 -TestGuids {GUID}")
+    technique = _proc("cmd.exe", "0x101", "0x100", "cmd /c echo hi")
+    client = RecordingClient(responses=[[launcher, technique]])
+    ev = client.collect_evidence("T1059.003", GUID, T0, host="sb-lab")
+
+    assert len(client.calls) == 1
+    assert "EventID == 4688" in client.calls[0][0]
+    assert ev["attribution"] == "lineage"
+    assert ev["technique_pids"] == {0x101}
+    assert ev["technique_events"] == []
+
+
+def test_collect_evidence_adds_hinted_non_4688_events():
+    # T1569.002 hints 4697 (service install): a second query, kept separate
+    # from the process lineage, lands in technique_events.
+    launcher = _proc("powershell.exe", "0x100", "0x50",
+                     f"Invoke-AtomicTest T1569.002 -TestGuids {GUID}")
+    svc_event = {"TimeGenerated": "2026-10-03T10:00:02Z", "EventID": 4697,
+                 "Process": "services.exe"}
+    client = RecordingClient(responses=[[launcher], [svc_event]])
+    ev = client.collect_evidence("T1569.002", GUID, T0, host="sb-lab")
+
+    assert len(client.calls) == 2
+    assert "EventID == 4688" in client.calls[0][0]
+    assert "EventID == 4697" in client.calls[1][0]
+    assert ev["technique_events"] == [svc_event]
+
+
 # ── authentication ─────────────────────────────────────────────────────────────
 
 class FakeResponse:
