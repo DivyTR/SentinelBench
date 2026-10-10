@@ -108,6 +108,14 @@ makes the caught count jump, suspect a regression here first.
   `az vm deallocate -g rg-sbench-lab -n vm-sbench`.
 - On the VM, SentinelBench runs under **managed identity** — no stored
   credentials. **Never paste secrets (admin passwords, tokens) into chat.**
+- **The VM has no git, and `C:\SentinelBench\app` is a ZIP extract, not a
+  clone.** The bootstrap installs SentinelBench by downloading
+  `github.com/DivyTR/SentinelBench/archive/refs/heads/<branch>.zip` (public
+  repo) and extracting it — so `git pull` does NOT work on the VM. To update
+  the VM to new commits, re-download and extract that ZIP into `app\`,
+  preserving `app\.env` (workspace ID + auth) and `app\sentinelbench.db` (run
+  history). Verify the swap with `Test-Path app\CLAUDE.md` + a `Select-String`
+  for a known-new symbol. Python *is* on PATH (installer added it); git is not.
 
 ## Status (2026-10-10)
 
@@ -125,7 +133,8 @@ makes the caught count jump, suspect a regression here first.
 
 ## Next
 
-1. **(user, VM)** Pull this commit on the VM. Confirm `[SB-B]` built-in rules
+1. **(user, VM)** Update the VM's code via ZIP re-download (no git on the VM —
+   see Lab specifics). Confirm `[SB-B]` built-in rules
    are enabled. **Smoke test first:** `python sentinelbench.py --technique
    T1059.003 --max-wait 3` — the evidence code has never run against live
    Sentinel, so this catches a KQL runtime error cheaply before the long run.
