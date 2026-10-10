@@ -179,12 +179,18 @@ makes the caught count jump, suspect a regression here first.
   they are config C's input.
 - Config C deployer: **built** (`core/rule_deployer.py`, 142 tests pass,
   dry-run exercised) but **NOT yet run against live ARM**. Prerequisites for a
-  live config C run, none done yet:
-  1. Grant the VM identity **Microsoft Sentinel Contributor** on the workspace/
-     RG (terraform change + apply — today it holds Log Analytics Reader only,
-     so live deploys will 403).
-  2. Add `SENTINEL_SUBSCRIPTION_ID` / `SENTINEL_RESOURCE_GROUP` /
-     `SENTINEL_WORKSPACE_NAME` to the VM `.env` (bootstrap doesn't write them).
+  live config C run:
+  1. **Role grant: in terraform now** (`azurerm_role_assignment.
+     vm_writes_sentinel_rules`, Microsoft Sentinel Contributor on the
+     workspace) — just needs `terraform apply` (creates one resource, does not
+     touch the VM). Until applied, live deploys 403.
+  2. Env vars `SENTINEL_SUBSCRIPTION_ID` / `SENTINEL_RESOURCE_GROUP` /
+     `SENTINEL_WORKSPACE_NAME`: terraform now **outputs** all three
+     (`sentinel_subscription_id` / `sentinel_resource_group` /
+     `sentinel_workspace_name`) — copy into the VM `.env` or export them.
+     Bootstrap `.env` writing was deliberately NOT modified: changing the
+     bootstrap script re-triggers the VM extension, which re-downloads the
+     pinned code ZIP and would revert the VM's branch.
   3. Open question to validate on first live deploy: do v19 technique IDs
      (e.g. T1685) pass ARM's `techniques` enum? If not, deploy with
      `include_attack_mapping=False` and have the config C re-run match `[SB-C]`

@@ -16,6 +16,9 @@ resource "random_string" "suffix" {
   special = false
 }
 
+# Used to surface the subscription id for the config C ARM env vars (outputs).
+data "azurerm_client_config" "current" {}
+
 resource "azurerm_log_analytics_workspace" "lab" {
   name                = "log-${local.name}-${random_string.suffix.result}"
   location            = azurerm_resource_group.lab.location
@@ -164,6 +167,18 @@ resource "azurerm_dev_test_global_vm_shutdown_schedule" "lab" {
 resource "azurerm_role_assignment" "vm_reads_logs" {
   scope                = azurerm_log_analytics_workspace.lab.id
   role_definition_name = "Log Analytics Reader"
+  principal_id         = azurerm_windows_virtual_machine.lab.identity[0].principal_id
+}
+
+# Config C deploys SentinelBench-generated analytics rules via the ARM API.
+# Writing Microsoft.SecurityInsights alertRules is beyond "Log Analytics
+# Reader"; it needs the Microsoft Sentinel Contributor role on the workspace.
+# Scoped to the workspace (tightest scope that still covers its SecurityInsights
+# child resources). Only meaningful once Sentinel is onboarded, but the grant
+# itself is harmless when it is not.
+resource "azurerm_role_assignment" "vm_writes_sentinel_rules" {
+  scope                = azurerm_log_analytics_workspace.lab.id
+  role_definition_name = "Microsoft Sentinel Contributor"
   principal_id         = azurerm_windows_virtual_machine.lab.identity[0].principal_id
 }
 
