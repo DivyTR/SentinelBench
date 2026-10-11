@@ -21,6 +21,8 @@ pip-wheel-metadata/
 
 # SQLite
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 
@@ -33,3 +35,17 @@ pip-wheel-metadata/
 # OS
 .DS_Store
 Thumbs.db
+
+# Dashboard
+dashboard/node_modules/
+dashboard/dist/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+crash.log

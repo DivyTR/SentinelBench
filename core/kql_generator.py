@@ -5,12 +5,24 @@ Generates KQL detection rules for missed detections.
 
 Design principle
 ----------------
-Rules are seeded with real event data from the simulation run — process names,
-EventIDs, command-line fragments observed in the lab — rather than generic
-templates.  This produces rules that are immediately relevant to the specific
-environment under test rather than copy-paste generic signatures.
+Each generated rule is a *behavioral* detection template for the technique —
+keyed on the EventID and the structural pattern that identifies the activity
+(e.g. "any new service install", "cmd.exe from an unusual parent") — not on
+the specific artifacts the lab happened to produce.
+
+This is deliberate. In a controlled Atomic Red Team lab the "real" telemetry
+is largely synthetic: ART's own test service/task/account names, benign `echo`
+command lines, and processes spawned by the Invoke-AtomicTest harness. Seeding
+those literal values into a rule's logic would overfit it to the lab and miss
+real tradecraft — the opposite of useful. So the observed telemetry is used to
+*ground* a rule (cited in a comment, so an analyst sees what the rule targets)
+but never pasted into its detection logic. (core/evidence.py isolates the
+technique's own processes from the harness; even so, the technique's top
+process is spawned by the harness, so its parent is not a trustworthy
+discriminator either.)
 
 Every generated rule includes:
+  - A "Lab evidence" comment grounding it in what the run actually observed
   - Inline comments explaining the detection logic
   - A confidence level tag (high / medium / requires_tuning)
   - A false-positive risk note
@@ -18,19 +30,17 @@ Every generated rule includes:
 
 Confidence levels
 -----------------
-  high            — Seeded directly from observed EventIDs and process names;
-                    specific enough to have low false-positive risk in most
-                    enterprise environments.
+  high            — Keyed on a high-fidelity structural signal (e.g. a service-
+                    install or log-clear EventID) that is rare outside the
+                    technique; low false-positive risk in most environments.
 
-  medium          — Uses technique-class heuristics; correct in principle but
-                    may need threshold tuning for the target environment.
+  medium          — Uses a technique-class behavioral heuristic; correct in
+                    principle but may need threshold or exclusion tuning.
 
-  requires_tuning — Template generated; requires analyst review and environment-
-                    specific adjustments before production deployment.
+  requires_tuning — Skeleton rule; requires analyst review and environment-
+                    specific discriminators before production deployment.
 """
 
-import json
-from typing import Optional
 
 
 # ── public interface ──────────────────────────────────────────────────────────
@@ -71,43 +81,42 @@ class KQLGenerator:
           false_positive_note str
         """
         generator_fn = _GENERATORS.get(technique_id, _generic_generator)
-        return generator_fn(technique_id, raw_logs)
+        suggestion = generator_fn(technique_id, raw_logs)
+        # Ground the rule in what the run observed, as a leading comment — never
+        # fed into the detection logic (see module docstring).
+        grounding = _evidence_grounding(raw_logs)
+        if grounding:
+            suggestion["kql_query"] = grounding + suggestion["kql_query"]
+        return suggestion
 
 
 # ── per-technique generators ──────────────────────────────────────────────────
 
 def _gen_T1059_001(technique_id: str, raw_logs: list[dict]) -> dict:
     """PowerShell execution detection."""
-    # Try to extract a real process name / command-line fragment from logs
-    cmdline_hint = _extract_field(raw_logs, "CommandLine", default="")
-    process_hint = _extract_field(raw_logs, "Process", default="powershell.exe")
-
-    confidence = "high" if cmdline_hint else "medium"
-    cmdline_filter = (
-        f'\n| where CommandLine has_any ("{cmdline_hint[:60]}", "-EncodedCommand", "-enc", "-e ")'
-        if cmdline_hint
-        else '\n| where CommandLine has_any ("-EncodedCommand", "-enc", "-e ", "IEX", "Invoke-Expression")'
-    )
-
-    kql = f"""// T1059.001 — PowerShell Execution
+    # Behavioral: keyed on obfuscation / download-and-execute flag patterns,
+    # not on the specific command the lab ran (that would overfit to ART).
+    kql = """// T1059.001 — PowerShell Execution
 // ATT&CK Tactic: Execution
 // Data source: SecurityEvent (Event ID 4688 — Process Creation)
-// Confidence: {confidence}
+// Confidence: medium
 //
-// Detects PowerShell invocations with common obfuscation or execution flags.
-// Lab evidence: process '{process_hint}' observed during simulation.
+// Detects PowerShell invocations carrying common obfuscation or
+// download-and-execute flags.
 
 SecurityEvent
 | where TimeGenerated >= ago(1h)
 | where EventID == 4688
-| where Process has_any ("powershell.exe", "pwsh.exe"){cmdline_filter}
+| where Process has_any ("powershell.exe", "pwsh.exe")
+| where CommandLine has_any ("-EncodedCommand", "-enc", "-e ", "IEX",
+                             "Invoke-Expression", "DownloadString", "FromBase64String")
 | project TimeGenerated, Computer, Account, Process, CommandLine,
           ParentProcessName, SubjectUserName
 | extend AttackTechnique = "T1059.001"
 """
     return {
         "kql_query":           kql.strip(),
-        "confidence":          confidence,
+        "confidence":          "medium",
         "data_source":         "SecurityEvent",
         "false_positive_note": "Legitimate PowerShell administration will trigger this rule. "
                                "Consider scoping to non-admin accounts or adding exclusions "
@@ -117,7 +126,6 @@ SecurityEvent
 
 def _gen_T1059_003(technique_id: str, raw_logs: list[dict]) -> dict:
     """Windows Command Shell detection."""
-    cmdline_hint = _extract_field(raw_logs, "CommandLine", default="")
     confidence = "medium"
 
     kql = f"""// T1059.003 — Windows Command Shell
@@ -131,10 +139,10 @@ SecurityEvent
 | where TimeGenerated >= ago(1h)
 | where EventID == 4688
 | where Process =~ "cmd.exe"
-| where ParentProcessName !has_any (
+| where not(ParentProcessName has_any (
     "explorer.exe", "services.exe", "svchost.exe",
     "cmd.exe", "conhost.exe"
-  )
+  ))
 | project TimeGenerated, Computer, Account, Process,
           CommandLine, ParentProcessName
 | extend AttackTechnique = "T1059.003"
@@ -224,7 +232,7 @@ SecurityEvent
 | where EventID == 4698
 | extend TaskName = extract(@"<Data Name='TaskName'>([^<]+)<", 1, EventData)
 | where EventData has_any (
-    "\\Windows\\Temp\\", "\\AppData\\", "%TEMP%",
+    "\\\\Windows\\\\Temp\\\\", "\\\\AppData\\\\", "%TEMP%",
     "powershell", "cmd.exe", "wscript", "mshta"
   )
 | project TimeGenerated, Computer, SubjectUserName, TaskName,
@@ -282,9 +290,8 @@ SecurityEvent
 | where TimeGenerated >= ago(1h)
 | where EventID == 4656
 | where ObjectName has "lsass"
-| where SubjectUserName !has_any ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE")
-| project TimeGenerated, Computer, SubjectUserName, ObjectName,
-          ProcessName, HandleID
+| where not(SubjectUserName has_any ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE"))
+| project TimeGenerated, Computer, SubjectUserName, ObjectName, ProcessName
 | extend AttackTechnique = "T1003.001"
 | union (
     Event
@@ -337,10 +344,10 @@ SecurityEvent
     }
 
 
-def _gen_T1070_001(technique_id: str, raw_logs: list[dict]) -> dict:
+def _gen_T1685_005(technique_id: str, raw_logs: list[dict]) -> dict:
     """Clear Windows Event Logs detection."""
-    kql = """// T1070.001 — Clear Windows Event Logs
-// ATT&CK Tactic: Defense Evasion
+    kql = """// T1685.005 — Clear Windows Event Logs (T1070.001 before ATT&CK v19)
+// ATT&CK Tactic: Defense Impairment
 // Data source: SecurityEvent (Event ID 1102 — Security log cleared)
 //              System log (Event ID 104 — System log cleared)
 // Confidence: high
@@ -353,12 +360,12 @@ SecurityEvent
 | where EventID in (1102, 104)
 | project TimeGenerated, Computer, SubjectUserName,
           SubjectDomainName, Channel = "Security"
-| extend AttackTechnique = "T1070.001", Priority = "CRITICAL"
+| extend AttackTechnique = "T1685.005", Priority = "CRITICAL"
 | union (
     Event
     | where Source == "Microsoft-Windows-Eventlog"
     | where EventID == 104
-    | project TimeGenerated, Computer, AttackTechnique = "T1070.001",
+    | project TimeGenerated, Computer, AttackTechnique = "T1685.005",
               Priority = "CRITICAL"
 )
 """
@@ -374,31 +381,33 @@ SecurityEvent
 
 def _generic_generator(technique_id: str, raw_logs: list[dict]) -> dict:
     """
-    Fallback generator for techniques without a specific rule template.
-    Produces a process-creation rule seeded with observed process names.
+    Fallback skeleton for techniques without a specific rule template.
+    The observed process is offered as a commented-out starting point (it may
+    be an ART artifact), never an active filter, so the rule does not silently
+    encode lab-specific noise.
     """
     process_hint = _extract_field(raw_logs, "Process", default="")
-    cmdline_hint = _extract_field(raw_logs, "CommandLine", default="")
 
-    process_filter = (
-        f'| where Process has "{process_hint}"'
+    process_suggestion = (
+        f'// | where Process has "{process_hint}"   // observed in lab — verify it is not an ART artifact before enabling'
         if process_hint
-        else "// TODO: add specific process name filter for this technique"
+        else "// TODO: add a specific process-name or command-line discriminator for this technique"
     )
 
-    kql = f"""// {technique_id} — Generic Process Creation Rule
+    kql = f"""// {technique_id} — Generic Process Creation Skeleton
 // ATT&CK Tactic: (see MITRE ATT&CK for {technique_id})
 // Data source: SecurityEvent (Event ID 4688)
 // Confidence: requires_tuning
 //
-// Auto-generated fallback rule. Review and customise before deploying.
-// Add specific process names, command-line patterns, or parent process
-// filters based on observed lab behaviour.
+// Auto-generated skeleton. No behavioral discriminator is known for this
+// technique yet, so as written it matches all process creation — an analyst
+// must add a discriminator (verified against real tradecraft, not the lab
+// artifact) before deploying.
 
 SecurityEvent
 | where TimeGenerated >= ago(1h)
 | where EventID == 4688
-{process_filter}
+{process_suggestion}
 | project TimeGenerated, Computer, Account, Process,
           CommandLine, ParentProcessName
 | extend AttackTechnique = "{technique_id}"
@@ -407,8 +416,9 @@ SecurityEvent
         "kql_query":           kql.strip(),
         "confidence":          "requires_tuning",
         "data_source":         "SecurityEvent",
-        "false_positive_note": "This is a generic template. Refine the process name "
-                               "and command-line filters before production deployment.",
+        "false_positive_note": "Generic skeleton with no active discriminator. Add a process "
+                               "name, command-line pattern, or parent-process filter — verified "
+                               "against real tradecraft, not the lab artifact — before deploying.",
     }
 
 
@@ -423,7 +433,7 @@ _GENERATORS = {
     "T1136.001": _gen_T1136_001,
     "T1003.001": _gen_T1003_001,
     "T1110.001": _gen_T1110_001,
-    "T1070.001": _gen_T1070_001,
+    "T1685.005": _gen_T1685_005,
     # Remaining techniques fall through to _generic_generator
     # and will be replaced with specific implementations in v1.1
 }
@@ -442,3 +452,37 @@ def _extract_field(
         if val and str(val).strip():
             return str(val).strip()
     return default
+
+
+def _evidence_grounding(raw_logs: list[dict]) -> str:
+    """
+    A comment block citing what the run actually observed, so a generated rule
+    is transparently tied to real telemetry. This grounds the rule for an
+    analyst; it is deliberately NOT fed into the detection logic (see the
+    module docstring — the lab's artifacts would overfit the rule).
+
+    Returns "" when no evidence was collected, so rules generated without
+    telemetry (e.g. a dry run) carry no misleading "evidence" header.
+    """
+    if not raw_logs:
+        return ""
+    process = _extract_field(raw_logs, "Process")
+    cmdline = _extract_field(raw_logs, "CommandLine")
+    event_ids = sorted({
+        str(r["EventID"]) for r in raw_logs
+        if isinstance(r, dict) and r.get("EventID") not in (None, "")
+    })
+    lines = []
+    if process:
+        lines.append(f"//   process observed: {process}")
+    if cmdline:
+        lines.append(f"//   command line:     {cmdline[:100]}")
+    if event_ids:
+        lines.append(f"//   event IDs:        {', '.join(event_ids)}")
+    if not lines:
+        return ""
+    return (
+        "// Lab evidence (grounding only — NOT seeded into the logic below):\n"
+        + "\n".join(lines)
+        + "\n//\n"
+    )

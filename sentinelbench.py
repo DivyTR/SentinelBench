@@ -30,40 +30,40 @@ Environment
 import argparse
 import json
 import os
-import platform
 import socket
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
+
+import requests
 
 # Load .env before importing core modules so env vars are available
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    print("[warn] python-dotenv not installed — reading env vars from shell only")
+    print("[warn] python-dotenv not installed - reading env vars from shell only")
 
 from core import (
-    init_db,
-    SentinelClient,
-    SimulationRunner,
     TECHNIQUES,
     V1_SUITE_ORDER,
-    MetricsEngine,
     KQLGenerator,
+    MetricsEngine,
+    SentinelClient,
+    SimulationRunner,
+    checkpoints_for_max_wait,
+    init_db,
 )
 from core.db import (
     create_run,
     finish_run,
-    save_result,
-    save_kql_suggestion,
-    run_summary,
-    list_runs,
-    get_results_for_run,
     get_kql_for_run,
-    get_missed_detections,
+    get_results_for_run,
+    list_runs,
+    run_summary,
+    save_kql_suggestion,
+    save_result,
 )
-
+from core.sentinel_client import SentinelClientError
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
@@ -109,12 +109,58 @@ def build_parser() -> argparse.ArgumentParser:
         "--notes", metavar="TEXT", default="",
         help="Optional notes to attach to this run",
     )
+    p.add_argument(
+        "--max-wait", metavar="MIN", type=int, default=15,
+        help="Minutes to wait for an alert before recording a miss "
+             "(default 15). Use a small value (e.g. 3) for a baseline run "
+             "with no detection rules, where every technique is missed.",
+    )
+    p.add_argument(
+        "--regenerate-kql", action="store_true",
+        help="Re-run the current KQL generator over a run's stored evidence "
+             "and overwrite its suggestions (use with --run-id). Lets generator "
+             "fixes reach an existing run without re-executing the suite.",
+    )
+    p.add_argument(
+        "--deploy-config-c", action="store_true",
+        help="Deploy generated [SB-C] analytics rules for a run's gaps "
+             "(use with --run-id). Previews unless --apply is given.",
+    )
+    p.add_argument(
+        "--teardown-config-c", action="store_true",
+        help="Remove all [SB-C] analytics rules from the workspace. "
+             "Previews unless --apply is given.",
+    )
+    p.add_argument(
+        "--apply", action="store_true",
+        help="With --deploy-config-c / --teardown-config-c, actually write to "
+             "Sentinel instead of previewing (preview is the default).",
+    )
     return p
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
 
+def _safe_console_output() -> None:
+    """
+    When output is piped (e.g. into Tee-Object to keep a log), Python on
+    Windows encodes stdout with the legacy ANSI code page (cp1252), and any
+    character outside it crashes the run with UnicodeEncodeError. Console
+    output is kept ASCII, and this replaces anything else instead of crashing.
+
+    Piped output is also block-buffered by default, so a multi-hour run would
+    show nothing (in the console or the log) until several KB had accumulated.
+    Line buffering makes progress visible as it happens.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace", line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> None:
+    _safe_console_output()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -139,11 +185,35 @@ def main() -> None:
         _print_kql(args.run_id)
         sys.exit(0)
 
+    if args.regenerate_kql:
+        if not args.run_id:
+            print("[error] --regenerate-kql requires --run-id <run>")
+            sys.exit(1)
+        _regenerate_kql(args.run_id)
+        sys.exit(0)
+
+    if args.deploy_config_c:
+        if not args.run_id:
+            print("[error] --deploy-config-c requires --run-id <run>")
+            sys.exit(1)
+        _deploy_config_c(args.run_id, apply=args.apply)
+        sys.exit(0)
+
+    if args.teardown_config_c:
+        _teardown_config_c(apply=args.apply)
+        sys.exit(0)
+
     # ── benchmark modes ────────────────────────────────────────────────────────
 
     if not args.technique and not args.suite:
         parser.print_help()
         sys.exit(0)
+
+    try:
+        checkpoints = checkpoints_for_max_wait(args.max_wait)
+    except ValueError as exc:
+        print(f"[error] {exc}")
+        sys.exit(1)
 
     dry_run = args.dry_run
 
@@ -151,7 +221,7 @@ def main() -> None:
     if args.technique:
         if args.technique not in TECHNIQUES:
             print(f"[error] Unknown technique '{args.technique}'")
-            print(f"        Use --list-techniques to see valid IDs.")
+            print("        Use --list-techniques to see valid IDs.")
             sys.exit(1)
         techniques = [args.technique]
         suite_name = args.technique
@@ -166,27 +236,35 @@ def main() -> None:
             client = SentinelClient()
             print("[auth] Testing Sentinel connection ...")
             client.test_connection()
-            print("[auth] Connected to Log Analytics workspace ✓")
-        except Exception as exc:
+            print("[auth] Connected to Log Analytics workspace OK")
+        except (SentinelClientError, requests.RequestException) as exc:
             print(f"[error] Sentinel connection failed: {exc}")
             print("        Check your .env credentials or use --dry-run to test the pipeline.")
             sys.exit(1)
     else:
-        print("[mode] DRY RUN — no ART execution, synthetic alert data")
+        print("[mode] DRY RUN - no ART execution, synthetic alert data")
         client = None  # MetricsEngine handles dry_run internally
 
     # Create the run record
+    host = socket.gethostname()
     run_id = create_run(
         suite=suite_name,
-        host=socket.gethostname(),
-        sentinel_workspace=os.environ.get("SENTINEL_WORKSPACE_ID", "dry-run"),
+        host=host,
+        sentinel_workspace="dry-run" if dry_run else os.environ.get("SENTINEL_WORKSPACE_ID"),
         notes=args.notes,
+        dry_run=dry_run,
     )
     print(f"\n[run] Started run {run_id}")
     print(f"[run] Suite: {suite_name}  |  Techniques: {len(techniques)}\n")
 
     runner  = SimulationRunner(dry_run=dry_run)
-    metrics = MetricsEngine(client=client, dry_run=dry_run)
+    if args.max_wait != 15 and not dry_run:
+        print(f"[mode] Alert wait capped at T+{args.max_wait}min "
+              f"(checkpoints: {', '.join(f'T+{c}min' for c in checkpoints)})")
+
+    metrics = MetricsEngine(
+        client=client, dry_run=dry_run, host=host, checkpoints=checkpoints,
+    )
     gen     = KQLGenerator()
 
     results = []
@@ -202,7 +280,7 @@ def main() -> None:
 
         if not sim_result["success"] and not dry_run:
             print(f"  [warn] ART execution failed: {sim_result['error']}")
-            print(f"  [warn] Skipping alert observation for this technique.")
+            print("  [warn] Skipping alert observation for this technique.")
             continue
 
         exec_time = datetime.fromisoformat(sim_result["timestamp_exec"])
@@ -210,17 +288,20 @@ def main() -> None:
         # 2. Observe Sentinel for alerts
         measurement = metrics.observe(
             technique_id=technique_id,
+            match_ids=meta["match_ids"],
             severity_expected=meta["severity_expected"],
             exec_time=exec_time,
+            art_guid=meta["art_guid"],
         )
 
         # 3. Persist result
         raw_log_json = (
-            json.dumps(measurement["raw_logs"][:5])
+            json.dumps(measurement["raw_logs"][:10])
             if measurement["raw_logs"]
             else None
         )
 
+        alert = measurement["alert_row"] or {}
         result_id = save_result(
             run_id=run_id,
             technique_id=technique_id,
@@ -229,11 +310,16 @@ def main() -> None:
             timestamp_exec=sim_result["timestamp_exec"],
             caught=measurement["caught"],
             severity_expected=meta["severity_expected"],
-            timestamp_alert=measurement.get("alert_row", {}).get("TimeGenerated") if measurement["alert_row"] else None,
+            timestamp_alert=measurement["timestamp_alert"],
             latency_seconds=measurement["latency_seconds"],
             severity_assigned=measurement["severity_assigned"],
             poll_checkpoint=measurement["poll_checkpoint"],
             raw_log_sample=raw_log_json,
+            art_guid=meta["art_guid"],
+            alert_name=alert.get("AlertName") or alert.get("Title"),
+            alert_provider=alert.get("ProviderName"),
+            alert_matched_ids=json.dumps(alert["MatchedIds"]) if alert.get("MatchedIds") else None,
+            timestamp_alert_ingested=alert.get("IngestedAt"),
         )
 
         # 4. Generate KQL if missed
@@ -275,7 +361,7 @@ def _print_run_summary(run_id: str) -> None:
     print(f"  Caught          : {summary['caught']}  ({summary['coverage_pct']}%)")
     print(f"  Missed          : {summary['missed']}")
     avg = summary['avg_latency_seconds']
-    print(f"  Avg latency     : {avg:.0f}s" if avg else "  Avg latency     : n/a")
+    print(f"  Avg latency     : {avg:.0f}s" if avg is not None else "  Avg latency     : n/a")
     print(f"  Severity miscal.: {summary['severity_miscalibrations']}")
     print(f"{'=' * 60}")
 
@@ -297,11 +383,12 @@ def _print_history(n: int) -> None:
         print("[history] No runs found.")
         return
     print(f"\n{'-' * 80}")
-    print(f"{'Run ID':<38} {'Suite':<15} {'Started':<22} {'Finished'}")
+    print(f"{'Run ID':<38} {'Suite':<15} {'Started':<22} {'Finished':<18} {'Mode'}")
     print(f"{'-' * 80}")
     for r in runs:
         finished = r["finished_at"][:16] if r["finished_at"] else "in progress"
-        print(f"{r['run_id']:<38} {r['suite']:<15} {r['started_at'][:16]:<22} {finished}")
+        mode = "dry-run" if r.get("dry_run") else "live"
+        print(f"{r['run_id']:<38} {r['suite']:<15} {r['started_at'][:16]:<22} {finished:<18} {mode}")
 
 
 def _print_results(run_id: str) -> None:
@@ -312,8 +399,8 @@ def _print_results(run_id: str) -> None:
     print(f"\n{'-' * 80}")
     for r in results:
         status  = "CAUGHT" if r["caught"] else "MISSED"
-        latency = f"{r['latency_seconds']:.0f}s" if r["latency_seconds"] else "—"
-        sev     = r["severity_assigned"] or "—"
+        latency = f"{r['latency_seconds']:.0f}s" if r["latency_seconds"] is not None else "-"
+        sev     = r["severity_assigned"] or "-"
         delta   = r["severity_delta"]
         delta_s = f"delta={delta:+d}" if delta is not None else ""
         print(f"  {r['technique_id']:<14} [{status}]  latency={latency:<6}  sev={sev:<14} {delta_s}")
@@ -332,6 +419,87 @@ def _print_kql(run_id: str) -> None:
         print(f"  Confidence: {s['confidence']}")
         print(f"  FP note   : {s['false_positive_note']}")
         print(f"\n{s['kql_query']}\n")
+
+
+def _regenerate_kql(run_id: str) -> None:
+    """Re-run the current generator over a run's stored evidence, overwriting
+    its KQL suggestions. Lets generator fixes reach an existing run without
+    re-executing the suite (the evidence is already persisted per result)."""
+    from core.db import delete_kql_for_result, get_missed_detections
+    missed = get_missed_detections(run_id)
+    if not missed:
+        print(f"[regen] No missed detections for run {run_id} (nothing to regenerate).")
+        return
+    gen = KQLGenerator()
+    print(f"\n[regen] Regenerating KQL for {len(missed)} miss(es) in run {run_id[:8]}...")
+    for r in missed:
+        try:
+            raw_logs = json.loads(r["raw_log_sample"]) if r.get("raw_log_sample") else []
+        except (ValueError, TypeError):
+            raw_logs = []
+        s = gen.generate(r["technique_id"], raw_logs)
+        delete_kql_for_result(r["result_id"])
+        save_kql_suggestion(
+            result_id=r["result_id"], technique_id=r["technique_id"],
+            kql_query=s["kql_query"], confidence=s["confidence"],
+            data_source=s["data_source"], false_positive_note=s["false_positive_note"],
+        )
+        print(f"  {r['technique_id']:<14} regenerated ({s['confidence']})")
+    print("[regen] Done. Stored suggestions now reflect the current generator.")
+
+
+def _deploy_config_c(run_id: str, apply: bool) -> None:
+    """Deploy (or preview) [SB-C] rules for a run's gaps — config C's deploy step."""
+    from core.rule_deployer import RuleDeployer, RuleDeployerError
+    mode = "APPLY" if apply else "PREVIEW (dry-run)"
+    print(f"\n[config-c] Deploying rules for run {run_id[:8]}...  mode: {mode}")
+    try:
+        report = RuleDeployer().deploy_run(run_id, dry_run=not apply)
+    except RuleDeployerError as exc:
+        print(f"[error] {exc}")
+        print("[hint] Needs SENTINEL_SUBSCRIPTION_ID, SENTINEL_RESOURCE_GROUP, "
+              "SENTINEL_WORKSPACE_NAME, and the identity must hold the "
+              "'Microsoft Sentinel Contributor' role (not just Reader).")
+        sys.exit(1)
+    if not report:
+        print("[config-c] No suggestions to deploy (all techniques caught, or none stored).")
+        return
+    errors = 0
+    for r in report:
+        if r["action"] == "skipped":
+            print(f"  {r['technique_id']:<14} skipped ({r['reason']})")
+        elif r["action"] == "dry_run":
+            print(f"  {r['technique_id']:<14} would PUT {r['payload']['properties']['displayName']}")
+        elif r["action"] == "error":
+            errors += 1
+            print(f"  {r['technique_id']:<14} ERROR {r['error']}")
+        else:
+            print(f"  {r['technique_id']:<14} deployed [{r['status_code']}] {r['displayName']}")
+    if not apply:
+        print("\n[config-c] Preview only. Re-run with --apply to write these rules to Sentinel.")
+    elif errors:
+        print(f"\n[config-c] {errors} rule(s) failed to deploy (see ERROR lines above).")
+        sys.exit(1)
+
+
+def _teardown_config_c(apply: bool) -> None:
+    """Remove (or preview removal of) all [SB-C] rules."""
+    from core.rule_deployer import RuleDeployer, RuleDeployerError
+    mode = "APPLY" if apply else "PREVIEW (dry-run)"
+    print(f"\n[config-c] Teardown of [SB-C] rules  mode: {mode}")
+    try:
+        report = RuleDeployer().teardown(dry_run=not apply)
+    except RuleDeployerError as exc:
+        print(f"[error] {exc}")
+        sys.exit(1)
+    if not report:
+        print("[config-c] No [SB-C] rules found in the workspace.")
+        return
+    for r in report:
+        verb = "would delete" if r["action"] == "dry_run" else f"deleted [{r['status_code']}]"
+        print(f"  {verb}  {r['displayName']}")
+    if not apply:
+        print("\n[config-c] Preview only. Re-run with --apply to delete these rules.")
 
 
 if __name__ == "__main__":

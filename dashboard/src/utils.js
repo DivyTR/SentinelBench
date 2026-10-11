@@ -28,7 +28,8 @@ export const TACTICS = [
   'Execution',
   'Persistence',
   'Credential Access',
-  'Defense Evasion',
+  'Stealth',
+  'Defense Impairment',
 ]
 
 export function fmtLatency(seconds) {
