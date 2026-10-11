@@ -219,10 +219,11 @@ makes the caught count jump, suspect a regression here first.
   non-existent `HandleID` column in T1003.001 — all fixed in kql_generator.
   `--regenerate-kql --run-id <id>` rewrites a run's stored suggestions with the
   current generator (needed because deploy reads stored KQL, not fresh). The
-  role grant + 3 ARM env vars (SUBSCRIPTION_ID/RESOURCE_GROUP/WORKSPACE_NAME =
-  137e3504.../rg-sbench-lab/log-sbench-1n7xg) are in place on the VM `.env`.
-  Workspace name `log-sbench-1n7xg`, query GUID `a6dd0ef6-bb96-4fc3-a768-
-  cdabca5f9d81`. **A clean config C re-run (suppression off) is in flight** —
+  role grant + 3 ARM env vars (SENTINEL_SUBSCRIPTION_ID / _RESOURCE_GROUP /
+  _WORKSPACE_NAME) are in place on the VM `.env`. Recover the values with
+  `az account show` and `terraform output` (resource_group / workspace_name) and
+  the query GUID from `terraform output workspace_id` — not hard-coded here, as
+  this file is public on the repo. **A clean config C re-run is in flight** —
   record its result per Next #1.
 - (historical) Config C deployer prerequisites — now all satisfied:
   1. **Role grant: in terraform now** (`azurerm_role_assignment.
