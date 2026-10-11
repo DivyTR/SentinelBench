@@ -182,9 +182,22 @@ makes the caught count jump, suspect a regression here first.
   **Headline:** ~12/15 techniques triggered NO alert at all in a Windows-
   logs-only deployment. KQL suggestions for the gaps are stored in the run;
   they are config C's input.
-- Config C deployer: **built** (`core/rule_deployer.py`, 142 tests pass,
-  dry-run exercised) but **NOT yet run against live ARM**. Prerequisites for a
-  live config C run:
+- Config C deploy: **DONE live** (2026-10-11). 8 `[SB-C]` scheduled rules
+  deployed to the workspace via ARM for run c5ba877d's gaps (T1059.001/003,
+  T1569.002, T1136.001, T1547.001, T1053.005, T1110.001, T1003.001); the 6
+  `requires_tuning` skeletons skipped. Getting there surfaced bugs ARM's
+  validators caught that nothing else had: (a) ARM needs a `tactics` entry per
+  `techniques`; (b) generated KQL used `!has_any` (not a KQL operator →
+  `not(x has_any ...)`), under-escaped backslashes in T1053.005, and a
+  non-existent `HandleID` column in T1003.001 — all fixed in kql_generator.
+  `--regenerate-kql --run-id <id>` rewrites a run's stored suggestions with the
+  current generator (needed because deploy reads stored KQL, not fresh). The
+  role grant + 3 ARM env vars (SUBSCRIPTION_ID/RESOURCE_GROUP/WORKSPACE_NAME =
+  137e3504.../rg-sbench-lab/log-sbench-1n7xg) are in place on the VM `.env`.
+  **Next: config C re-measurement** — re-run the suite and compare to config
+  B's 1/15 to see which gaps the `[SB-C]` rules close. Teardown when done:
+  `--teardown-config-c --apply`.
+- (historical) Config C deployer prerequisites — now all satisfied:
   1. **Role grant: in terraform now** (`azurerm_role_assignment.
      vm_writes_sentinel_rules`, Microsoft Sentinel Contributor on the
      workspace) — just needs `terraform apply` (creates one resource, does not
