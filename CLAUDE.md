@@ -311,10 +311,16 @@ code). It will be a new run_id, labelled "config C clean (suppression off)".
    detected-vs-covered, latency, severity, the caught measurement artifacts) +
    limitations + reproducibility. Review/tweak wording with the user; it feeds
    the README and the resume bullets.
-5. **README:** fold the real results in (it has methodology but the results/
-   roadmap tables still say "planned"/"in progress"); flip them to done.
-6. **Dashboard** (`dashboard/`, React + `api.py`): point at the real run DB,
-   capture a screenshot/GIF for the README.
+5. **README:** ✅ **DONE** — headline result table (0→1→7), link to RESULTS.md,
+   dashboard screenshot embedded; status/roadmap tables flipped to done; config C
+   "(planned)" removed; dashboard/README.md rewritten (it was "coming in v0.2"
+   but is fully built).
+6. **Dashboard:** ✅ it's fully built (FastAPI `api.py` + React/D3/Tailwind, 3
+   tabs: heatmap / run history / remediation). Verified running locally against
+   a DB seeded with the real B+C numbers; screenshots in `docs/img/`. To run:
+   `python dashboard/api.py` + `cd dashboard && npm run dev`. NOTE: the repo's
+   `sentinelbench.db` is a local demo seed (gitignored); canonical data is the
+   VM's DB.
 7. **Resume bullets** — rewrite around the real, defensible numbers.
 8. **Teardown + stop:** `--teardown-config-c --apply` when analysis is done,
    then `az vm deallocate -g rg-sbench-lab -n vm-sbench`.

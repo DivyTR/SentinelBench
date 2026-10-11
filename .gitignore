@@ -21,6 +21,8 @@ pip-wheel-metadata/
 
 # SQLite
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 

@@ -30,10 +30,24 @@ This is an active build, developed in phases. It runs against a real Azure Senti
 |---|---|---|
 | 0 | Correct measurement engine, pinned ART tests, unit tests, CI | **done** |
 | 1 | Reproducible Azure lab as Terraform (workspace, Sentinel, monitored Windows VM, cost guardrails) | **done** |
-| 2 | Measurement runs against real Sentinel — config A (no rules) and config B (built-in rules) | **in progress** |
-| 3 | Closed loop — generate rules for the gaps, deploy, re-measure; published results write-up | planned |
+| 2 | Measurement runs against real Sentinel — config A (control) and config B (built-in rules) | **done** |
+| 3 | Closed loop — generate rules for the gaps, deploy to Sentinel, re-measure; results write-up | **done** |
 
-Final coverage/latency numbers are deliberately **not** published in this README yet; they are being collected and will be added with the methodology that produced them. The measurement engine and its integrity rules (below) are the part that is settled.
+## Headline result
+
+Across 15 ATT&CK techniques in a Windows-logs-only Sentinel deployment:
+
+| Config | Analytics rules in the workspace | Techniques detected within 15 min |
+|-------:|----------------------------------|:---------------------------------:|
+| **A — control** | none | **0 / 15** |
+| **B — built-in** | Microsoft's Windows Security Events rules | **1 / 15** |
+| **C — closed loop** | built-in **+** SentinelBench-generated rules | **7 / 15** |
+
+Microsoft's built-in rules detected **1 of 15**. SentinelBench generated candidate rules for the gaps, deployed them to Sentinel via the ARM API, and re-measured — detection rose to **7 / 15**, closing 6 gaps. An earlier version of the tool reported a *false* **12/15** for config B; finding and fixing the three measurement bugs behind that number is as much a result as the detection counts, and is documented alongside them.
+
+**→ Full methodology, per-technique results, findings, and honest limitations: [`RESULTS.md`](RESULTS.md).**
+
+![SentinelBench dashboard — ATT&CK detection heatmap for config C (7/15), coloured by latency](docs/img/dashboard-heatmap.png)
 
 ---
 
@@ -92,7 +106,7 @@ Benchmarking a brand-new workspace is uninteresting (it has no rules, so everyth
 
 - **Config A — control:** empty workspace, no analytics rules. Confirms the pipeline and establishes the floor (everything missed).
 - **Config B — built-in rules:** Microsoft's Windows Security Events analytics rules enabled at 5-minute frequency, to measure what the out-of-box detection *logic* catches, decoupled from Sentinel's default (hourly-to-daily) rule cadence.
-- **Config C — closed loop (planned):** SentinelBench generates rules for config B's gaps, deploys them, and re-measures to show the gaps close.
+- **Config C — closed loop:** SentinelBench generates rules for config B's gaps, deploys them to Sentinel via the ARM API, and re-measures to show the gaps close. In the run above this took detection from 1/15 to 7/15 (see [`RESULTS.md`](RESULTS.md)).
 
 ---
 
@@ -202,8 +216,8 @@ These are the honest boundary conditions of v1 — several discovered by running
 
 | Version | Focus |
 |---|---|
-| **v1 (current)** | 15 Windows techniques · reproducible Terraform lab · correct measurement engine with integrity guards · config A/B experiment · KQL suggestions for gaps · heatmap dashboard |
-| **v2** | Config C closed loop (generate → deploy → re-measure) · richer per-technique behavioral templates · repeated runs with variance · published results and methodology write-up |
+| **v1 (current)** | 15 Windows techniques · reproducible Terraform lab · correct measurement engine with integrity guards · config A/B/C experiment including the closed loop (generate → deploy → re-measure) · KQL suggestions for gaps · heatmap dashboard · [results write-up](RESULTS.md) |
+| **v2** | Richer per-technique behavioral templates (close the T1547.001 / LSASS gaps) · exact sub-technique rule tagging · repeated runs with variance · more technique coverage |
 | **v3** | Expand technique set and tactics · Linux endpoint support · multi-run trend analysis · PDF/stakeholder reporting |
 
 ---
