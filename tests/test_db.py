@@ -37,6 +37,23 @@ def test_save_result_computes_severity_delta_and_keeps_alert_metadata(path):
     assert s["avg_latency_seconds"] == 0.0
 
 
+def test_delete_kql_for_result_enables_regenerate(path):
+    # Regenerating a run's KQL = delete the stored suggestion, save the fresh
+    # one. Guards the DB side of --regenerate-kql.
+    run_id = db.create_run("v1", "host", "ws", path=path)
+    rid = _result(run_id, path, caught=False, raw_log_sample='[{"EventID": 4688}]')
+    db.save_kql_suggestion(rid, "T1112", "OLD | where x !has_any ('y')",
+                           "medium", "SecurityEvent", path=path)
+    assert len(db.get_kql_for_run(run_id, path)) == 1
+
+    assert db.delete_kql_for_result(rid, path) == 1
+    db.save_kql_suggestion(rid, "T1112", "NEW | where not(x has_any ('y'))",
+                           "medium", "SecurityEvent", path=path)
+
+    rows = db.get_kql_for_run(run_id, path)
+    assert len(rows) == 1 and "!has_any" not in rows[0]["kql_query"]
+
+
 def test_empty_run_summary_has_all_keys(path):
     s = db.run_summary("nope", path)
     assert s["total"] == 0 and s["coverage_pct"] is None and s["avg_latency_seconds"] is None

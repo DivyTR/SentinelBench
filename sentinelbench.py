@@ -116,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
              "with no detection rules, where every technique is missed.",
     )
     p.add_argument(
+        "--regenerate-kql", action="store_true",
+        help="Re-run the current KQL generator over a run's stored evidence "
+             "and overwrite its suggestions (use with --run-id). Lets generator "
+             "fixes reach an existing run without re-executing the suite.",
+    )
+    p.add_argument(
         "--deploy-config-c", action="store_true",
         help="Deploy generated [SB-C] analytics rules for a run's gaps "
              "(use with --run-id). Previews unless --apply is given.",
@@ -177,6 +183,13 @@ def main() -> None:
 
     if args.show_kql and args.run_id:
         _print_kql(args.run_id)
+        sys.exit(0)
+
+    if args.regenerate_kql:
+        if not args.run_id:
+            print("[error] --regenerate-kql requires --run-id <run>")
+            sys.exit(1)
+        _regenerate_kql(args.run_id)
         sys.exit(0)
 
     if args.deploy_config_c:
@@ -406,6 +419,33 @@ def _print_kql(run_id: str) -> None:
         print(f"  Confidence: {s['confidence']}")
         print(f"  FP note   : {s['false_positive_note']}")
         print(f"\n{s['kql_query']}\n")
+
+
+def _regenerate_kql(run_id: str) -> None:
+    """Re-run the current generator over a run's stored evidence, overwriting
+    its KQL suggestions. Lets generator fixes reach an existing run without
+    re-executing the suite (the evidence is already persisted per result)."""
+    from core.db import delete_kql_for_result, get_missed_detections
+    missed = get_missed_detections(run_id)
+    if not missed:
+        print(f"[regen] No missed detections for run {run_id} (nothing to regenerate).")
+        return
+    gen = KQLGenerator()
+    print(f"\n[regen] Regenerating KQL for {len(missed)} miss(es) in run {run_id[:8]}...")
+    for r in missed:
+        try:
+            raw_logs = json.loads(r["raw_log_sample"]) if r.get("raw_log_sample") else []
+        except (ValueError, TypeError):
+            raw_logs = []
+        s = gen.generate(r["technique_id"], raw_logs)
+        delete_kql_for_result(r["result_id"])
+        save_kql_suggestion(
+            result_id=r["result_id"], technique_id=r["technique_id"],
+            kql_query=s["kql_query"], confidence=s["confidence"],
+            data_source=s["data_source"], false_positive_note=s["false_positive_note"],
+        )
+        print(f"  {r['technique_id']:<14} regenerated ({s['confidence']})")
+    print("[regen] Done. Stored suggestions now reflect the current generator.")
 
 
 def _deploy_config_c(run_id: str, apply: bool) -> None:

@@ -261,6 +261,13 @@ def save_kql_suggestion(
     return suggestion_id
 
 
+def delete_kql_for_result(result_id: str, path: Path = DB_PATH) -> int:
+    """Remove stored KQL suggestions for a result (used before regenerating)."""
+    with get_connection(path) as conn:
+        cur = conn.execute("DELETE FROM kql_suggestions WHERE result_id = ?", (result_id,))
+        return cur.rowcount
+
+
 def get_kql_for_run(run_id: str, path: Path = DB_PATH) -> list[dict]:
     """Return all KQL suggestions for missed detections in a run."""
     with get_connection(path) as conn:
