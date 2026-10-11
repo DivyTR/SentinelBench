@@ -69,8 +69,10 @@ def test_build_payload_is_a_scheduled_sbc_rule():
     assert props["suppressionEnabled"] is True and props["suppressionDuration"] == "PT5H"
     assert RULE_LABEL in props["labels"]
     # Tagged so the config C re-run can credit it via the Techniques column.
+    # ARM wants the parent technique id plus a corresponding tactic.
     assert props["techniques"] == ["T1059"]
-    assert props["subTechniques"] == ["T1059.003"]
+    assert props["tactics"] == ["Execution"]
+    assert "subTechniques" not in props
 
 
 def test_severity_comes_from_the_technique_registry():
@@ -80,16 +82,18 @@ def test_severity_comes_from_the_technique_registry():
         _suggestion("T1059.003"))["properties"]["severity"] == "Medium"
 
 
-def test_base_technique_has_no_subtechniques_field():
-    props = _deployer().build_rule_payload(_suggestion("T1040"))["properties"]
-    assert props["techniques"] == ["T1040"]
-    assert "subTechniques" not in props
+def test_technique_and_tactic_are_tagged_together():
+    # ARM rejects a technique with no corresponding tactic, so they must come
+    # as a pair. T1003.001 is Credential Access -> CredentialAccess.
+    props = _deployer().build_rule_payload(_suggestion("T1003.001"))["properties"]
+    assert props["techniques"] == ["T1003"]
+    assert props["tactics"] == ["CredentialAccess"]
 
 
 def test_attack_mapping_can_be_omitted():
     props = _deployer().build_rule_payload(
         _suggestion(), include_attack_mapping=False)["properties"]
-    assert "techniques" not in props and "subTechniques" not in props
+    assert "techniques" not in props and "tactics" not in props
 
 
 def test_rule_id_is_deterministic_and_per_technique():

@@ -153,9 +153,15 @@ class RuleDeployer:
 
         Severity comes from the technique's expected severity (the whole point
         of the benchmark is whether the *right* severity fires), falling back to
-        Medium. The rule is tagged with the technique so the config C re-run's
-        matcher can credit it via the SecurityAlert `Techniques` column, exactly
-        like any built-in rule — no special-casing of our own rules.
+        Medium. The rule is tagged with the technique (parent ID) and its
+        tactic so the config C re-run's matcher can credit it via the
+        SecurityAlert `Techniques` column, exactly like any built-in rule.
+
+        ARM requires a `tactics` entry corresponding to each `techniques` entry,
+        and its tactic enum is classic ATT&CK (no v19 Stealth / Defense
+        Impairment — those map back to DefenseEvasion). We only attach the
+        attack mapping when the tactic resolves; otherwise the rule deploys
+        untagged (and the re-run falls back to matching by display name).
         """
         technique_id = suggestion["technique_id"]
         meta = TECHNIQUES.get(technique_id, {})
@@ -179,11 +185,10 @@ class RuleDeployer:
             "suppressionDuration": suppression_duration,
             "labels": [RULE_LABEL],
         }
-        if include_attack_mapping:
-            techniques, sub_techniques = _attack_fields(technique_id)
-            props["techniques"] = techniques
-            if sub_techniques:
-                props["subTechniques"] = sub_techniques
+        tactic = _arm_tactic(meta.get("tactic"))
+        if include_attack_mapping and tactic:
+            props["tactics"] = [tactic]
+            props["techniques"] = [technique_id.split(".")[0]]  # ARM wants the parent ID
         return {"kind": "Scheduled", "properties": props}
 
     # ── deploy / list / teardown ────────────────────────────────────────────────
@@ -344,16 +349,34 @@ class RuleDeployer:
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _attack_fields(technique_id: str) -> tuple[list[str], list[str]]:
-    """
-    Split a technique id into ARM's `techniques` (parent) and `subTechniques`
-    (full) fields. ARM's `techniques` enum expects parent IDs; the sub-id goes
-    in `subTechniques`. Our suite's match_ids already include both the full and
-    the parent id, so the SecurityAlert `Techniques` column matches either way.
-    """
-    parent = technique_id.split(".")[0]
-    sub = [technique_id] if "." in technique_id else []
-    return [parent], sub
+# Our registry tactic names -> ARM's classic AttackTactic enum. v19 split
+# Defense Evasion into Stealth + Defense Impairment; ARM still only knows the
+# classic DefenseEvasion, so both map there.
+_ARM_TACTIC = {
+    "reconnaissance":       "Reconnaissance",
+    "resource development": "ResourceDevelopment",
+    "initial access":       "InitialAccess",
+    "execution":            "Execution",
+    "persistence":          "Persistence",
+    "privilege escalation": "PrivilegeEscalation",
+    "defense evasion":      "DefenseEvasion",
+    "defense impairment":   "DefenseEvasion",
+    "stealth":              "DefenseEvasion",
+    "credential access":    "CredentialAccess",
+    "discovery":            "Discovery",
+    "lateral movement":     "LateralMovement",
+    "collection":           "Collection",
+    "command and control":  "CommandAndControl",
+    "exfiltration":         "Exfiltration",
+    "impact":               "Impact",
+}
+
+
+def _arm_tactic(registry_tactic) -> str | None:
+    """Map a registry tactic name to ARM's enum, or None if unmappable."""
+    if not registry_tactic:
+        return None
+    return _ARM_TACTIC.get(str(registry_tactic).strip().lower())
 
 
 def _as_severity(value) -> str:
