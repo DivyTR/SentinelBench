@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+
+subscription_id      = "00000000-0000-0000-0000-000000000000" # az account show --query id -o tsv
+admin_source_cidr    = "203.0.113.7/32"                       # your public IP: curl -s https://ifconfig.me
+budget_contact_email = "you@example.com"
+budget_start_date    = "2026-10-01T00:00:00Z"                 # first day of the current month
+
+# First apply: false. Check logs arrive, then set true and apply again.
+enable_sentinel = false
+
+# location           = "germanywestcentral"
+# vm_size            = "Standard_B2s"
+# log_daily_quota_gb = 1
+# Until the Phase 0/1 work is merged, install SentinelBench from its branch:
+sentinelbench_ref = "claude/pensive-bohr-nxf0zf"

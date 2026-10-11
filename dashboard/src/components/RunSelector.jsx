@@ -21,6 +21,7 @@ export default function RunSelector({ runs, selectedId, onChange }) {
           <option key={r.run_id} value={r.run_id}>
             {shortId(r.run_id)} · {r.suite} · {fmtDate(r.started_at)}
             {r.coverage_pct != null ? ` · ${r.coverage_pct}% caught` : ''}
+            {r.dry_run ? ' · DRY RUN' : ''}
           </option>
         ))}
       </select>

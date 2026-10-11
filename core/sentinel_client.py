@@ -5,40 +5,55 @@ Microsoft Sentinel / Log Analytics API client.
 
 Authentication
 --------------
-Uses the OAuth 2.0 client-credentials flow against the Azure AD token endpoint.
-Credentials are read from environment variables (never hardcoded).
+SENTINEL_AUTH selects how the client gets a Log Analytics token:
 
-Required env vars (set in .env and loaded by sentinelbench.py via python-dotenv):
-  SENTINEL_TENANT_ID
-  SENTINEL_CLIENT_ID
-  SENTINEL_CLIENT_SECRET
-  SENTINEL_WORKSPACE_ID
+  managed_identity  The Azure VM's system-assigned identity, via the Instance
+                    Metadata Service. The default on the lab VM built by
+                    infra/terraform: no secret exists anywhere.
+  azure_cli         Whatever `az login` session is active. Convenient for
+                    querying from a laptop.
+  client_secret     App registration + secret (OAuth client-credentials).
+                    Needs SENTINEL_TENANT_ID, SENTINEL_CLIENT_ID and
+                    SENTINEL_CLIENT_SECRET.
 
-The App Registration in Azure AD needs the following API permission:
-  Microsoft.OperationalInsights / Data.Read   (application permission)
-and must be granted admin consent.
+If SENTINEL_AUTH is unset, client_secret is used when its three variables
+are present (the original behaviour).
+
+Whichever identity is used needs the "Log Analytics Reader" role on the
+workspace. SENTINEL_WORKSPACE_ID is always required.
 """
 
 import json
 import os
+import re
+import shutil
+import subprocess
 import time
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
 
 import requests
 
+from .evidence import attribute_processes
 
-# ── token cache (in-memory, per-process) ─────────────────────────────────────
+# ── token cache (in-memory, per-process, per auth mode) ──────────────────────
 
-_token_cache: dict = {"token": None, "expires_at": 0}
+_token_cache: dict = {}
 
 TOKEN_URL_TEMPLATE = (
     "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 )
-RESOURCE_SCOPE = "https://api.loganalytics.io/.default"
+LOG_ANALYTICS_RESOURCE = "https://api.loganalytics.io"
+RESOURCE_SCOPE = LOG_ANALYTICS_RESOURCE + "/.default"
+IMDS_TOKEN_URL = "http://169.254.169.254/metadata/identity/oauth2/token"
 QUERY_URL_TEMPLATE = (
     "https://api.loganalytics.io/v1/workspaces/{workspace_id}/query"
 )
+
+AUTH_MODES = ("managed_identity", "azure_cli", "client_secret")
+
+# A Sentinel rule mapped to more ATT&CK techniques than this is treated as a
+# generic catch-all, not a per-technique detection (see check_alert_for_technique).
+MAX_ALERT_TECHNIQUES = 8
 
 
 class SentinelClientError(Exception):
@@ -59,45 +74,102 @@ class SentinelClient:
 
     def __init__(
         self,
-        tenant_id: Optional[str] = None,
-        client_id: Optional[str] = None,
-        client_secret: Optional[str] = None,
-        workspace_id: Optional[str] = None,
+        workspace_id: str | None = None,
+        auth: str | None = None,
+        tenant_id: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
     ):
-        self.tenant_id     = tenant_id     or _require_env("SENTINEL_TENANT_ID")
-        self.client_id     = client_id     or _require_env("SENTINEL_CLIENT_ID")
-        self.client_secret = client_secret or _require_env("SENTINEL_CLIENT_SECRET")
-        self.workspace_id  = workspace_id  or _require_env("SENTINEL_WORKSPACE_ID")
+        self.workspace_id = workspace_id or _require_env("SENTINEL_WORKSPACE_ID")
+        self.auth = auth or os.environ.get("SENTINEL_AUTH") or _default_auth_mode()
+        if self.auth not in AUTH_MODES:
+            raise SentinelClientError(
+                f"SENTINEL_AUTH must be one of {', '.join(AUTH_MODES)} (got {self.auth!r})"
+            )
+        if self.auth == "client_secret":
+            self.tenant_id     = tenant_id     or _require_env("SENTINEL_TENANT_ID")
+            self.client_id     = client_id     or _require_env("SENTINEL_CLIENT_ID")
+            self.client_secret = client_secret or _require_env("SENTINEL_CLIENT_SECRET")
 
     # ── authentication ────────────────────────────────────────────────────────
 
     def get_token(self) -> str:
         """
-        Return a valid bearer token, refreshing from Azure AD if expired.
-        Tokens are cached in-memory to avoid unnecessary round-trips.
+        Return a valid bearer token, fetching a new one if the cached token
+        expires within 60 seconds.
         """
-        now = time.time()
-        if _token_cache["token"] and now < _token_cache["expires_at"] - 60:
-            return _token_cache["token"]
+        cached = _token_cache.get(self.auth)
+        if cached and time.time() < cached["expires_at"] - 60:
+            return cached["token"]
 
-        url = TOKEN_URL_TEMPLATE.format(tenant_id=self.tenant_id)
-        payload = {
-            "grant_type":    "client_credentials",
-            "client_id":     self.client_id,
-            "client_secret": self.client_secret,
-            "scope":         RESOURCE_SCOPE,
-        }
+        fetch = {
+            "managed_identity": self._token_from_managed_identity,
+            "azure_cli":        self._token_from_azure_cli,
+            "client_secret":    self._token_from_client_secret,
+        }[self.auth]
+        token, expires_at = fetch()
+        _token_cache[self.auth] = {"token": token, "expires_at": expires_at}
+        return token
 
-        resp = requests.post(url, data=payload, timeout=15)
+    def _token_from_client_secret(self) -> tuple[str, float]:
+        resp = requests.post(
+            TOKEN_URL_TEMPLATE.format(tenant_id=self.tenant_id),
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     self.client_id,
+                "client_secret": self.client_secret,
+                "scope":         RESOURCE_SCOPE,
+            },
+            timeout=15,
+        )
         if resp.status_code != 200:
             raise SentinelClientError(
                 f"Token request failed: {resp.status_code} — {resp.text[:300]}"
             )
-
         data = resp.json()
-        _token_cache["token"]      = data["access_token"]
-        _token_cache["expires_at"] = now + int(data.get("expires_in", 3600))
-        return _token_cache["token"]
+        return data["access_token"], time.time() + int(data.get("expires_in", 3600))
+
+    def _token_from_managed_identity(self) -> tuple[str, float]:
+        # IMDS is link-local: never route it through an HTTP proxy.
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            resp = session.get(
+                IMDS_TOKEN_URL,
+                params={"api-version": "2018-02-01", "resource": LOG_ANALYTICS_RESOURCE},
+                headers={"Metadata": "true"},
+                timeout=5,
+            )
+        except requests.RequestException as exc:
+            raise SentinelClientError(
+                f"Managed identity endpoint unreachable ({exc}). "
+                "managed_identity only works on an Azure VM with an identity assigned."
+            ) from exc
+        if resp.status_code != 200:
+            raise SentinelClientError(
+                f"Managed identity token request failed: {resp.status_code} — {resp.text[:300]}"
+            )
+        data = resp.json()
+        return data["access_token"], time.time() + int(data.get("expires_in", 3600))
+
+    def _token_from_azure_cli(self) -> tuple[str, float]:
+        az = shutil.which("az")
+        if not az:
+            raise SentinelClientError("azure_cli auth selected but the 'az' CLI is not on PATH")
+        proc = subprocess.run(
+            [az, "account", "get-access-token",
+             "--resource", LOG_ANALYTICS_RESOURCE, "--output", "json"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if proc.returncode != 0:
+            raise SentinelClientError(
+                f"az account get-access-token failed (run 'az login'?): {proc.stderr.strip()[:300]}"
+            )
+        data = json.loads(proc.stdout)
+        # Newer CLI versions return expires_on as epoch seconds; fall back to
+        # a conservative 5 minutes if it is missing.
+        expires_at = float(data.get("expires_on") or time.time() + 300)
+        return data["accessToken"], expires_at
 
     # ── query ─────────────────────────────────────────────────────────────────
 
@@ -126,7 +198,7 @@ class SentinelClient:
 
         if resp.status_code == 401:
             # Token may have expired mid-run; invalidate cache and retry once
-            _token_cache["token"] = None
+            _token_cache.pop(self.auth, None)
             headers["Authorization"] = f"Bearer {self.get_token()}"
             resp = requests.post(url, headers=headers, json=body, timeout=30)
 
@@ -141,54 +213,104 @@ class SentinelClient:
 
     def check_alert_for_technique(
         self,
-        technique_id: str,
+        match_ids: list[str],
         since: datetime,
-        window_minutes: int = 15,
-    ) -> Optional[dict]:
+        until: datetime,
+        host: str | None = None,
+        max_techniques: int = MAX_ALERT_TECHNIQUES,
+    ) -> dict | None:
         """
-        Look for a Sentinel SecurityAlert or SecurityIncident linked to
-        the given ATT&CK technique ID, created after `since`.
-
-        Returns the first matching alert row as a dict, or None if not found.
+        Return the earliest Sentinel alert created in [since, until] that is
+        tagged with one of `match_ids` and is specific enough to attribute, or
+        None.
 
         How matching works
         ------------------
-        Sentinel's built-in analytics rules tag alerts with ATT&CK technique IDs
-        in the ExtendedProperties or Tactics/Techniques fields.
-        We query SecurityAlert first (Fusion + built-in rules write here),
-        then fall back to SecurityIncident.
+        We match ONLY on the alert's declared MITRE mapping: the `Techniques`
+        column on SecurityAlert (a JSON array of ATT&CK IDs set by the rule).
+        We require an EXACT id match against match_ids. A plain `has "T1059"`
+        would also match alerts tagged T1059.003 and credit the wrong
+        technique.
+
+        We deliberately do NOT read ExtendedProperties or any other field that
+        carries the raw event that triggered the rule. Those fields contain the
+        offending command line, and SentinelBench launches every technique with
+        a harness command that names the technique ("Invoke-AtomicTest
+        T1552.001 ..."), so extracting IDs from that text matched a technique to
+        its own harness invocation.
+
+        Breadth guard
+        -------------
+        Some Microsoft rules are mapped to dozens of ATT&CK techniques because
+        the toolkit they detect is multi-purpose. The "Powershell Empire
+        Cmdlets" rule, for instance, is tagged with 51 techniques, nearly the
+        whole suite. Such a rule firing is a generic "suspicious toolkit" alert,
+        not a specific detection of any one technique, and crediting it to all
+        51 produced 12/15 fake catches. So an alert whose mapping lists more
+        than `max_techniques` IDs is ignored for attribution. Rules that target
+        a technique specifically (log-clearing is tagged with ~1 technique, and
+        the rules SentinelBench generates with exactly 1) pass the guard.
+
+        If `host` is given, the alert must name it in CompromisedEntity or
+        Entities, so alerts from other machines in the workspace are ignored.
+
+        SecurityAlert receives a new row each time an alert's status changes;
+        arg_min per SystemAlertId keeps the row from when it was first created.
+        Falls back to SecurityIncident when no alert row matches.
         """
-        since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        ids = _kql_dynamic_list(match_ids)
+        since_str, until_str = _kql_datetime(since), _kql_datetime(until)
+        host_filter = ""
+        if host:
+            h = _validate_host(host)
+            host_filter = (
+                f'| where CompromisedEntity has "{h}" or tostring(Entities) has "{h}"\n'
+            )
+
         kql = f"""
 SecurityAlert
-| where TimeGenerated >= datetime({since_str})
-| where ExtendedProperties has "{technique_id}"
-      or Tactics has "{technique_id}"
-| project TimeGenerated, AlertName, AlertSeverity, ExtendedProperties, Tactics
+| where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| extend IngestedAt = ingestion_time()
+| extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)", tostring(Techniques))
+| where array_length(AttackIds) <= {max_techniques}
+| extend MatchedIds = set_intersect(AttackIds, {ids})
+| where array_length(MatchedIds) > 0
+{host_filter}| summarize arg_min(TimeGenerated, *) by SystemAlertId
+| project TimeGenerated, IngestedAt, StartTime, AlertName, AlertSeverity,
+          ProviderName, CompromisedEntity, MatchedIds, AttackIds, SystemAlertId
 | order by TimeGenerated asc
 | take 1
 """
-        rows = self.query(kql, timespan=f"PT{window_minutes}M")
+        timespan = f"{since_str}/{until_str}"
+        rows = self.query(kql, timespan=timespan)
         if rows:
-            return rows[0]
+            return {**rows[0], "SourceTable": "SecurityAlert"}
 
-        # Fallback: SecurityIncident (aggregated alerts → incidents)
+        # Fallback: SecurityIncident (aggregated alerts -> incidents). Read the
+        # incident's own techniques field, not the whole AdditionalData blob,
+        # for the same reason as above.
         kql_incident = f"""
 SecurityIncident
-| where CreatedTime >= datetime({since_str})
-| where AdditionalData has "{technique_id}"
-| project CreatedTime, Title, Severity, AdditionalData
+| where CreatedTime between (datetime({since_str}) .. datetime({until_str}))
+| extend AttackIds = extract_all(@"(T\\d{{4}}(?:\\.\\d{{3}})?)",
+                                 tostring(parse_json(tostring(AdditionalData)).techniques))
+| where array_length(AttackIds) <= {max_techniques}
+| extend MatchedIds = set_intersect(AttackIds, {ids})
+| where array_length(MatchedIds) > 0
+| summarize arg_min(CreatedTime, *) by IncidentNumber
+| project CreatedTime, Title, Severity, ProviderName, MatchedIds, IncidentNumber
 | order by CreatedTime asc
 | take 1
 """
-        rows = self.query(kql_incident, timespan=f"PT{window_minutes}M")
-        return rows[0] if rows else None
+        rows = self.query(kql_incident, timespan=timespan)
+        return {**rows[0], "SourceTable": "SecurityIncident"} if rows else None
 
     def fetch_raw_logs(
         self,
         technique_id: str,
         exec_time: datetime,
         window_minutes: int = 5,
+        host: str | None = None,
     ) -> list[dict]:
         """
         Pull the raw Windows Security Event / Sysmon logs generated during
@@ -197,22 +319,24 @@ SecurityIncident
 
         Uses technique-specific EventID hints defined in TECHNIQUE_EVENT_HINTS.
         """
-        since_str = exec_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        until_str = _add_minutes(exec_time, window_minutes).strftime("%Y-%m-%dT%H:%M:%SZ")
+        since_str = _kql_datetime(exec_time)
+        until_str = _kql_datetime(_add_minutes(exec_time, window_minutes))
 
         hints = TECHNIQUE_EVENT_HINTS.get(technique_id, {})
         event_ids = hints.get("event_ids", [4688])  # default: process creation
         table = hints.get("table", "SecurityEvent")
 
         event_id_filter = " or ".join(f"EventID == {e}" for e in event_ids)
+        host_filter = f'| where Computer startswith "{_validate_host(host)}"\n' if host else ""
 
         if table == "Event":
             # Sysmon events — structured fields are inside EventData XML
             kql = f"""
 {table}
 | where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| where Source == "Microsoft-Windows-Sysmon"
 | where {event_id_filter}
-| extend EventDataParsed = parse_xml(EventData)
+{host_filter}| extend EventDataParsed = parse_xml(EventData)
 | project TimeGenerated, EventID, Computer,
           Process       = tostring(EventDataParsed.DataItem.Image),
           CommandLine   = tostring(EventDataParsed.DataItem.CommandLine),
@@ -226,19 +350,97 @@ SecurityIncident
 {table}
 | where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
 | where {event_id_filter}
-| project TimeGenerated, EventID, Computer, Account, Process, CommandLine,
+{host_filter}| project TimeGenerated, EventID, Computer, Account, Process, CommandLine,
           ParentProcessName, SubjectUserName, TargetUserName
 | order by TimeGenerated asc
 | take 20
 """
-        return self.query(kql, timespan=f"PT{window_minutes + 2}M")
+        return self.query(kql, timespan=f"{since_str}/{until_str}")
+
+    def collect_evidence(
+        self,
+        technique_id: str,
+        art_guid: str | None,
+        exec_time: datetime,
+        host: str | None = None,
+        window_minutes: int = 5,
+    ) -> dict:
+        """
+        Gather the telemetry this technique produced, separated from the ART
+        harness and from unrelated background activity (see core/evidence.py).
+
+        1. All 4688 process creations in the window, attributed by process
+           lineage from the execution step's launcher, so the technique's own
+           processes (e.g. pktmon.exe, findstr.exe) are isolated from the
+           Invoke-AtomicTest wrapper and from Edge/WMI/telemetry noise.
+        2. The technique's hinted non-4688 events (registry, service install,
+           task creation, account creation, log clear, failed logon), which are
+           specific by EventID so host-scoping is enough.
+
+        Returns the attribute_processes() dict plus "technique_events".
+        """
+        since = exec_time - timedelta(seconds=5)
+        until = _add_minutes(exec_time, window_minutes)
+        since_str, until_str = _kql_datetime(since), _kql_datetime(until)
+        timespan = f"{since_str}/{until_str}"
+        host_filter = f'| where Computer startswith "{_validate_host(host)}"\n' if host else ""
+
+        processes = self.query(f"""
+SecurityEvent
+| where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| where EventID == 4688
+{host_filter}| project TimeGenerated, EventID, Computer, SubjectUserName,
+          Process = NewProcessName, NewProcessName, NewProcessId, ProcessId,
+          ParentProcessName, CommandLine
+| order by TimeGenerated asc
+| take 500
+""", timespan=timespan)
+        evidence = attribute_processes(processes, art_guid)
+
+        hints = TECHNIQUE_EVENT_HINTS.get(technique_id, {})
+        table = hints.get("table", "SecurityEvent")
+        event_ids = [
+            e for e in hints.get("event_ids", [])
+            if not (table == "SecurityEvent" and e == 4688)
+        ]
+        technique_events: list[dict] = []
+        if event_ids:
+            id_filter = " or ".join(f"EventID == {e}" for e in event_ids)
+            if table == "Event":
+                technique_events = self.query(f"""
+Event
+| where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| where Source == "Microsoft-Windows-Sysmon"
+| where {id_filter}
+{host_filter}| extend P = parse_xml(EventData)
+| project TimeGenerated, EventID, Computer,
+          Process      = tostring(P.DataItem.Image),
+          CommandLine  = tostring(P.DataItem.CommandLine),
+          TargetObject = tostring(P.DataItem.TargetObject),
+          Details      = tostring(P.DataItem.Details)
+| order by TimeGenerated asc
+| take 50
+""", timespan=timespan)
+            else:
+                technique_events = self.query(f"""
+SecurityEvent
+| where TimeGenerated between (datetime({since_str}) .. datetime({until_str}))
+| where {id_filter}
+{host_filter}| project TimeGenerated, EventID, Computer, Account, Process, CommandLine,
+          ParentProcessName, SubjectUserName, TargetUserName
+| order by TimeGenerated asc
+| take 50
+""", timespan=timespan)
+
+        evidence["technique_events"] = technique_events
+        return evidence
 
     def test_connection(self) -> bool:
         """
         Verify credentials and workspace connectivity.
         Returns True on success, raises SentinelClientError on failure.
         """
-        rows = self.query("Heartbeat | take 1", timespan="PT5M")
+        self.query("Heartbeat | take 1", timespan="PT5M")
         return True  # if query() didn't raise, we're connected
 
 
@@ -248,9 +450,9 @@ SecurityIncident
 
 TECHNIQUE_EVENT_HINTS: dict[str, dict] = {
     # Execution
-    "T1059.001": {"table": "SecurityEvent",  "event_ids": [4688, 4104]},  # PowerShell
+    "T1059.001": {"table": "SecurityEvent",  "event_ids": [4688]},        # powershell.exe process creation
     "T1059.003": {"table": "SecurityEvent",  "event_ids": [4688]},        # cmd.exe
-    "T1569.002": {"table": "SecurityEvent",  "event_ids": [4697, 7045]},  # Service install
+    "T1569.002": {"table": "SecurityEvent",  "event_ids": [4697]},        # Service install (7045 is in the System log -> Event table)
 
     # Persistence
     "T1547.001": {"table": "Event",          "event_ids": [13, 14]},      # Sysmon reg events (Event table)
@@ -258,21 +460,31 @@ TECHNIQUE_EVENT_HINTS: dict[str, dict] = {
     "T1136.001": {"table": "SecurityEvent",  "event_ids": [4720]},        # Account created
 
     # Credential Access
-    "T1003.001": {"table": "SecurityEvent",  "event_ids": [4656]},        # LSASS handle request (SecurityEvent only; Sysmon ID 10 queried separately in KQL)
+    "T1003.001": {"table": "Event",          "event_ids": [10]},          # Sysmon ProcessAccess on lsass (4656 needs a SACL the lab does not set)
     "T1110.001": {"table": "SecurityEvent",  "event_ids": [4625, 4771]},  # Failed logons
     "T1552.001": {"table": "SecurityEvent",  "event_ids": [4663, 4688]},  # File access
     "T1555.003": {"table": "SecurityEvent",  "event_ids": [4688]},        # Browser proc
     "T1040":     {"table": "SecurityEvent",  "event_ids": [4688]},        # Network sniffer
 
-    # Defense Evasion
-    "T1070.001": {"table": "SecurityEvent",  "event_ids": [1102, 104]},   # Log cleared
-    "T1562.001": {"table": "SecurityEvent",  "event_ids": [4688, 7036]},  # Service stopped
+    # Stealth / Defense Impairment
+    "T1685.005": {"table": "SecurityEvent",  "event_ids": [1102]},        # Security log cleared
+    "T1685":     {"table": "SecurityEvent",  "event_ids": [4688]},        # sc.exe stop WinDefend
     "T1027":     {"table": "SecurityEvent",  "event_ids": [4688]},        # Obfuscated exec
     "T1112":     {"table": "Event",          "event_ids": [13, 14]},      # Sysmon reg modification (Event table)
 }
 
 
 # ── internal helpers ───────────────────────────────────────────────────────────
+
+def _default_auth_mode() -> str:
+    if all(os.environ.get(v) for v in
+           ("SENTINEL_TENANT_ID", "SENTINEL_CLIENT_ID", "SENTINEL_CLIENT_SECRET")):
+        return "client_secret"
+    raise SentinelClientError(
+        "Set SENTINEL_AUTH to managed_identity, azure_cli or client_secret "
+        "(see .env.example)."
+    )
+
 
 def _require_env(name: str) -> str:
     val = os.environ.get(name)
@@ -303,5 +515,30 @@ def _parse_response(data: dict) -> list[dict]:
 
 
 def _add_minutes(dt: datetime, minutes: int) -> datetime:
-    from datetime import timedelta
     return dt + timedelta(minutes=minutes)
+
+
+_ATTACK_ID_RE = re.compile(r"^T\d{4}(\.\d{3})?$")
+_HOST_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
+
+
+def _kql_datetime(dt: datetime) -> str:
+    """Format a datetime as a UTC literal for KQL datetime() and API timespans."""
+    if dt.tzinfo is None:
+        raise ValueError("datetimes passed to KQL must be timezone-aware")
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _kql_dynamic_list(attack_ids: list[str]) -> str:
+    """Render ATT&CK IDs as a KQL dynamic array, rejecting anything malformed."""
+    for t in attack_ids:
+        if not _ATTACK_ID_RE.match(t):
+            raise ValueError(f"Not an ATT&CK technique ID: {t!r}")
+    return "dynamic([" + ", ".join(f'"{t}"' for t in attack_ids) + "])"
+
+
+def _validate_host(host: str) -> str:
+    """Hostnames are interpolated into KQL, so only allow hostname characters."""
+    if not _HOST_RE.match(host):
+        raise ValueError(f"Invalid hostname for KQL filter: {host!r}")
+    return host

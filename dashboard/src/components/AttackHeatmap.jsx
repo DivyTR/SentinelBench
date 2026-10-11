@@ -20,10 +20,13 @@ const TECHNIQUE_GRID = {
     { id: 'T1555.003', name: 'Browser Creds' },
     { id: 'T1040',     name: 'Net Sniffing' },
   ],
-  'Defense Evasion': [
-    { id: 'T1070.001', name: 'Clear Logs' },
-    { id: 'T1562.001', name: 'Disable AV' },
+  // ATT&CK v19 split Defense Evasion into Stealth and Defense Impairment
+  'Stealth': [
     { id: 'T1027',     name: 'Obfuscation' },
+  ],
+  'Defense Impairment': [
+    { id: 'T1685.005', name: 'Clear Logs' },
+    { id: 'T1685',     name: 'Disable AV' },
     { id: 'T1112',     name: 'Modify Reg' },
   ],
 }
