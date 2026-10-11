@@ -2,7 +2,10 @@
 
 > Cross-session memory for Claude Code. Keep this accurate and current. The
 > "Status" and "Next" sections are the live state; update them as work lands.
-> Last updated: **2026-10-10** (commit `063719b`).
+> Last updated: **2026-10-11**. If a fresh session is picking this up: read
+> "Status" and "Next" first — they are authoritative over any older phrasing
+> elsewhere in this file. Config A/B/C are all real now (config C deployed and
+> measured); the project is in the **results + write-up** phase.
 
 ## What this project is
 
@@ -22,8 +25,9 @@ reinforced everywhere: brutal honesty, no flattery, no fabricated data.
 ## The central invariant — do not regress
 
 An earlier version reported **12/15 caught** for config B. That was false,
-caused by three bugs. The honest number is **~2/15**. The fixes, which must be
-preserved:
+caused by three bugs. The honest number is **1-2/15** (measured 1/15 in run
+c5ba877d; T1136.001 is timing-variable, so a run can show 2). The fixes, which
+must be preserved:
 
 1. **Match alerts on the declared `Techniques` column only** — never `Tactics`
    (holds tactic names, never technique IDs) and never `ExtendedProperties` /
@@ -72,11 +76,15 @@ makes the caught count jump, suspect a regression here first.
   into Sentinel as `[SB-C]` scheduled analytics rules via the **ARM** API
   (`management.azure.com` — a different token audience, and the workspace's ARM
   path: subscription/RG/**name**, not the query GUID). Dry-run by default;
-  `deploy_run(run_id)`, `teardown()`, `list_sb_rules()`. Suppression baked in
-  (`suppressionDuration PT5H`) → fixes the ~170× re-fire. CLI:
+  `deploy_run(run_id)`, `teardown()`, `list_sb_rules()`. **Suppression OFF by
+  default** (`suppress=True` for production) — PT5H suppression corrupts
+  cross-run measurement; see Status. Rule payload sets a tactic per technique
+  (ARM requires it) and the parent technique id for crediting. CLI:
   `--deploy-config-c --run-id <id> [--apply]`, `--teardown-config-c [--apply]`
-  (preview unless `--apply`). Self-contained ARM auth (deliberate copy of the
-  3 modes, not shared with SentinelClient).
+  (preview unless `--apply`). Also `--regenerate-kql --run-id <id>` rewrites a
+  run's stored suggestions with the current generator (deploy reads stored KQL,
+  so generator fixes need this to reach an existing run). Self-contained ARM
+  auth (deliberate copy of the 3 modes, not shared with SentinelClient).
 - `core/db.py` — SQLite results storage.
 - `infra/terraform/` — lab IaC (resource group, VNet, Windows VM, Log Analytics
   workspace, DCRs, optional Sentinel onboarding gated on `enable_sentinel`).
@@ -91,21 +99,39 @@ makes the caught count jump, suspect a regression here first.
 - **Config A — control:** empty workspace, no rules. Floor; everything missed.
 - **Config B — built-in rules:** Microsoft's Windows Security Events analytics
   rules enabled at 5-min frequency. Measures the detection *logic*, decoupled
-  from Sentinel's slow default cadence. **Honest result ≈ 2/15.**
-- **Config C — closed loop (NOT BUILT YET):** generate rules for config B's
-  gaps, deploy as `[SB-C]` scheduled rules, re-measure, show the gaps close.
-  This is the project's headline claim and currently vaporware.
+  from Sentinel's slow default cadence. **Measured: 1/15** (run c5ba877d;
+  ~1-2/15 given T1136.001 timing variance).
+- **Config C — closed loop (BUILT + DEPLOYED):** generate rules for config B's
+  gaps, deploy as `[SB-C]` scheduled rules via ARM, re-measure, show the gaps
+  close. The headline claim, now real — see Status for results. A/B/C numbers:
+  **0/15 → 1/15 → ~6-7/15** (control → built-in → built-in + generated).
 
 ## Honest limitations (already documented in README §Limitations)
 
 - Brute-force (T1110.001) generates 4625 type-3 events with **no source IP**
   (local `LogonUser` call), so rules correlating failures per source IP can't
   fire. Real miss, not a tool bug.
-- T1136.001's account is removed by ART cleanup, so a "created-and-deleted"
-  rule catching it depends on cleanup timing, not creation.
+- T1136.001's account is removed by ART cleanup, so a built-in
+  "created-and-deleted" rule catching it depends on cleanup timing. (Config C's
+  `[SB-C]` rule avoids this — it keys on the 4720 creation event, which
+  persists in the log after the account is deleted.)
+- **T1003.001 (LSASS): no telemetry in the lab.** The workspace has no 4656
+  (needs a SACL/"Audit Kernel Object" on lsass) and no Sysmon EventID 10
+  (ProcessAccess not in the pinned Sysmon config). So no rule — built-in or
+  generated — can detect LSASS access here. Documented config C residual, a
+  telemetry-coverage limitation, not a rule failure.
+- **T1547.001: rule-vs-atomic mismatch.** 1462 Sysmon-13 (registry) events
+  exist but none touch a Run key, so the ART atomic likely used the
+  startup-folder (file) variant or a path the rule doesn't cover. The `[SB-C]`
+  registry rule therefore never matched. Fixable by aligning the rule to what
+  the atomic actually does; left as a documented residual.
 - **Logs-only lab:** Windows Security Events + Sysmon, no Defender XDR / MDE.
   Many built-in rules need those connectors and can't fire here — itself a
   realistic finding about "Windows-logs-only" deployments, but it bounds B.
+- **`[SB-C]` catch latency ~7-10 min (amber/red band).** Scheduled rules run on
+  a 5-min cadence + ingestion lag, so generated rules close the coverage gap
+  but not instantly. Config B's built-ins were measured at the same 5-min
+  cadence, so A/B/C latency is comparable.
 
 ## Lab / Azure specifics (for re-acquiring the environment)
 
@@ -194,9 +220,9 @@ makes the caught count jump, suspect a regression here first.
   current generator (needed because deploy reads stored KQL, not fresh). The
   role grant + 3 ARM env vars (SUBSCRIPTION_ID/RESOURCE_GROUP/WORKSPACE_NAME =
   137e3504.../rg-sbench-lab/log-sbench-1n7xg) are in place on the VM `.env`.
-  **Next: config C re-measurement** — re-run the suite and compare to config
-  B's 1/15 to see which gaps the `[SB-C]` rules close. Teardown when done:
-  `--teardown-config-c --apply`.
+  Workspace name `log-sbench-1n7xg`, query GUID `a6dd0ef6-bb96-4fc3-a768-
+  cdabca5f9d81`. **A clean config C re-run (suppression off) is in flight** —
+  record its result per Next #1.
 - (historical) Config C deployer prerequisites — now all satisfied:
   1. **Role grant: in terraform now** (`azurerm_role_assignment.
      vm_writes_sentinel_rules`, Microsoft Sentinel Contributor on the
@@ -233,30 +259,48 @@ makes the caught count jump, suspect a regression here first.
   limitation). Net: with suppression off, config C ≈ **1 built-in + 6 [SB-C] =
   ~7/15** pending a clean re-run; T1547.001 could make 8 if the parse is fixed.
 
-## Next
+## Next — finish-line checklist
 
-1. **(user, VM)** Update the VM's code via ZIP re-download (no git on the VM —
-   see Lab specifics). Confirm `[SB-B]` built-in rules
-   are enabled. **Smoke test first:** `python sentinelbench.py --technique
-   T1059.003 --max-wait 3` — the evidence code has never run against live
-   Sentinel, so this catches a KQL runtime error cheaply before the long run.
-2. **(user, VM, ~3.4h unattended)** Full config B re-run:
-   `python sentinelbench.py --suite v1 --notes "config B, evidence wiring"`.
-3. **(together)** Analyze results (expect ~2–3/15); confirm which rules fired
-   and why.
-4. **Config C deployer: DONE** (`core/rule_deployer.py` + CLI). Next is the
-   **live config C run**, which needs the three prerequisites in Status above:
-   (a) terraform: grant the VM identity Microsoft Sentinel Contributor + apply;
-   (b) add the 3 ARM env vars to the VM `.env`;
-   (c) `python sentinelbench.py --deploy-config-c --run-id c5ba877d` (preview),
-   then `--apply`; verify in portal; then re-run the suite and measure whether
-   the `[SB-C]` rules close the gaps. Tear down with `--teardown-config-c
-   --apply` afterwards.
-5. **(together)** Config C analysis: show gaps close, A/B/C comparison, results
-   write-up. Also run a labeled config A (control) + one B repeat (variance).
-6. **Later:** resume-bullet rewrite; decide whether this CLAUDE.md is kept when
-   the branch is merged to main (it's working memory, not necessarily a
-   shipped artifact).
+Config A/B/C are built and the lab works end to end. What remains is turning
+the runs into a defensible, presentable result. In order:
+
+**In flight:** a clean config C re-run is executing on the VM — suppression now
+OFF, rules re-deployed (`--deploy-config-c ... --apply` on the suppression-off
+code). It will be a new run_id, labelled "config C clean (suppression off)".
+
+1. **Record the clean config C result** when it finishes: caught/15, which
+   techniques, latencies, severity deltas. If any deployed-rule technique still
+   shows missed, cross-check with
+   `SecurityAlert | where AlertName startswith "[SB-C]"` to separate a real miss
+   from timing. Expected ~6-7/15 (the 6 working `[SB-C]` rules + T1685.005
+   built-in); T1547.001 and T1003.001 miss (documented residuals). Update
+   Status with the final **A/B/C: 0/15 → 1/15 → N/15**.
+2. **Config A control** (labelled 0/15 floor): built-in rules disabled, run
+   `--suite v1 --max-wait 3 --notes "config A control"`. Fast (all missed).
+   Asserted but never captured as a run.
+3. **Optional:** one config B repeat for run-to-run variance.
+4. **Results write-up** — the portfolio centerpiece. Methodology + A/B/C +
+   the honest arc: the 12/15→1/15 integrity fix (Techniques-only matching +
+   breadth guard), config C closing gaps, and the residuals stated plainly
+   (T1003.001 telemetry gap, T1547.001 atomic mismatch, log-clear severity
+   miscalibration, scheduled-rule latency). The measurement artifacts we caught
+   and corrected (fake 12/15; suppression false-misses) are evidence of rigor —
+   feature them, don't hide them.
+5. **README:** fold the real results in (it has methodology but the results/
+   roadmap tables still say "planned"/"in progress"); flip them to done.
+6. **Dashboard** (`dashboard/`, React + `api.py`): point at the real run DB,
+   capture a screenshot/GIF for the README.
+7. **Resume bullets** — rewrite around the real, defensible numbers.
+8. **Teardown + stop:** `--teardown-config-c --apply` when analysis is done,
+   then `az vm deallocate -g rg-sbench-lab -n vm-sbench`.
+9. **PR to main** only when the user asks. Branch `claude/pensive-bohr-nxf0zf`
+   holds everything. Decide whether this CLAUDE.md ships to main or stays
+   working memory.
+
+**Known fixable residuals (not blockers):** T1547.001 rule-vs-atomic mismatch;
+the 6 `requires_tuning` techniques (T1552.001, T1555.003, T1040, T1112, T1027,
+T1685) have no behavioral rule — honestly skipped, would need per-technique
+generators (out of v1 scope).
 
 ## Conventions
 
