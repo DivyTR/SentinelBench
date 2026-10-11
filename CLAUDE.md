@@ -213,8 +213,25 @@ makes the caught count jump, suspect a regression here first.
      (e.g. T1685) pass ARM's `techniques` enum? If not, deploy with
      `include_attack_mapping=False` and have the config C re-run match `[SB-C]`
      rules by display-name prefix instead of the Techniques column.
-- Alert suppression (~170× re-fire): **done** — baked into the deployer
-  (`suppressionDuration PT5H`, `suppressionEnabled`).
+- Alert suppression: **OFF by default** (reversed 2026-10-11). PT5H suppression
+  was briefly on to curb re-fire, but it silently corrupts measurement — a rule
+  that fired in a canary or earlier run stays suppressed for hours, so the next
+  run false-MISSES it. The metrics engine credits only the first alert per
+  window, so re-fire is cosmetic, not a correctness problem; cross-run
+  suppression is. `build_rule_payload(suppress=True)` re-enables it for
+  production rules.
+- **Config C first run (c90b3f9c, 2026-10-11): 4/15 raw, but the cross-check
+  shows 6/8 deployed rules actually work.** SecurityAlert (7h) confirms these
+  `[SB-C]` rules fired with correct tag+severity: T1059.001, T1053.005,
+  T1110.001 (credited in-run) and T1569.002, T1059.003, T1136.001 (fired
+  earlier that morning → PT5H-suppressed through their full-run window → FALSE
+  MISSES). Telemetry query: Sysmon 13 = 1462, 4697 = 1 exist; **4656 and Sysmon
+  10 absent**. So of the 2 non-firing rules: T1547.001 has its telemetry
+  (Sysmon 13) but didn't match → **rule-logic/parse bug to investigate** (the
+  TargetObject values ART wrote need checking); T1003.001 **can't fire** — no
+  4656, no Sysmon 10 → genuine **telemetry-coverage gap** (documented
+  limitation). Net: with suppression off, config C ≈ **1 built-in + 6 [SB-C] =
+  ~7/15** pending a clean re-run; T1547.001 could make 8 if the parse is fixed.
 
 ## Next
 

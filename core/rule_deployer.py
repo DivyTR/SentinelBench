@@ -144,7 +144,8 @@ class RuleDeployer:
         *,
         query_frequency: str = "PT5M",
         query_period: str = "PT1H",
-        suppression_duration: str = "PT5H",
+        suppress: bool = False,
+        suppression_duration: str = "PT5M",
         include_attack_mapping: bool = True,
     ) -> dict:
         """
@@ -162,6 +163,14 @@ class RuleDeployer:
         Impairment — those map back to DefenseEvasion). We only attach the
         attack mapping when the tactic resolves; otherwise the rule deploys
         untagged (and the re-run falls back to matching by display name).
+
+        Suppression is OFF by default. It was briefly ON (PT5H) to curb alert
+        re-fire, but that silently corrupts measurement: a rule that fired in a
+        canary or an earlier run stays suppressed for hours, so the next suite
+        run records a false MISS for it. The metrics engine already credits only
+        the *first* alert in each technique's window, so re-fire is cosmetic,
+        not a measurement problem — whereas cross-run suppression is. Production
+        rules would re-enable it (pass suppress=True); a benchmark must not.
         """
         technique_id = suggestion["technique_id"]
         meta = TECHNIQUES.get(technique_id, {})
@@ -181,7 +190,7 @@ class RuleDeployer:
             "queryPeriod": query_period,
             "triggerOperator": "GreaterThan",
             "triggerThreshold": 0,
-            "suppressionEnabled": True,
+            "suppressionEnabled": suppress,
             "suppressionDuration": suppression_duration,
             "labels": [RULE_LABEL],
         }

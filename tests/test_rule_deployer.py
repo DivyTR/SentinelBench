@@ -66,7 +66,10 @@ def test_build_payload_is_a_scheduled_sbc_rule():
     assert props["query"] == "SecurityEvent | take 1"
     assert props["enabled"] is True
     assert props["triggerOperator"] == "GreaterThan" and props["triggerThreshold"] == 0
-    assert props["suppressionEnabled"] is True and props["suppressionDuration"] == "PT5H"
+    # Suppression OFF by default — benchmarks must measure fresh each run.
+    assert props["suppressionEnabled"] is False
+    assert _deployer().build_rule_payload(
+        _suggestion(), suppress=True)["properties"]["suppressionEnabled"] is True
     assert RULE_LABEL in props["labels"]
     # Tagged so the config C re-run can credit it via the Techniques column.
     # ARM wants the parent technique id plus a corresponding tactic.
