@@ -306,13 +306,11 @@ code). It will be a new run_id, labelled "config C clean (suppression off)".
    `--suite v1 --max-wait 3 --notes "config A control"`. Fast (all missed).
    Asserted but never captured as a run.
 3. **Optional:** one config B repeat for run-to-run variance.
-4. **Results write-up** — the portfolio centerpiece. Methodology + A/B/C +
-   the honest arc: the 12/15→1/15 integrity fix (Techniques-only matching +
-   breadth guard), config C closing gaps, and the residuals stated plainly
-   (T1003.001 telemetry gap, T1547.001 atomic mismatch, log-clear severity
-   miscalibration, scheduled-rule latency). The measurement artifacts we caught
-   and corrected (fake 12/15; suppression false-misses) are evidence of rigor —
-   feature them, don't hide them.
+4. **Results write-up** — ✅ **DONE: `RESULTS.md`** (drafted 2026-10-11).
+   Methodology + A/B/C (0→1→7) + per-technique table + findings (integrity fix,
+   detected-vs-covered, latency, severity, the caught measurement artifacts) +
+   limitations + reproducibility. Review/tweak wording with the user; it feeds
+   the README and the resume bullets.
 5. **README:** fold the real results in (it has methodology but the results/
    roadmap tables still say "planned"/"in progress"); flip them to done.
 6. **Dashboard** (`dashboard/`, React + `api.py`): point at the real run DB,
