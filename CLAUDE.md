@@ -322,12 +322,15 @@ code). It will be a new run_id, labelled "config C clean (suppression off)".
    `python dashboard/api.py` + `cd dashboard && npm run dev`. NOTE: the repo's
    `sentinelbench.db` is a local demo seed (gitignored); canonical data is the
    VM's DB.
-7. **Resume bullets** — rewrite around the real, defensible numbers.
-8. **Teardown + stop:** `--teardown-config-c --apply` when analysis is done,
-   then `az vm deallocate -g rg-sbench-lab -n vm-sbench`.
-9. **PR to main** only when the user asks. Branch `claude/pensive-bohr-nxf0zf`
-   holds everything. Decide whether this CLAUDE.md ships to main or stays
-   working memory.
+7. **Resume bullets** — ✅ DONE (delivered in chat 2026-10-11: 4 honest,
+   quantified bullets around 0→1→7, the ~12× integrity catch, the Terraform
+   lab, and the engine+dashboard+tests).
+8. **Teardown + stop** (user's VM action, remaining): `--teardown-config-c
+   --apply` when done screenshotting the live rules, then
+   `az vm deallocate -g rg-sbench-lab -n vm-sbench`.
+9. **PR to main** — ✅ OPENED: DivyTR/SentinelBench#1 (whole branch → main).
+   CLAUDE.md sanitized (Azure IDs redacted) and included as a dev-log; user may
+   drop it from main for a leaner tree. Awaiting review/merge.
 
 **Known fixable residuals (not blockers):** T1547.001 rule-vs-atomic mismatch;
 the 6 `requires_tuning` techniques (T1552.001, T1555.003, T1040, T1112, T1027,
