@@ -259,6 +259,28 @@ makes the caught count jump, suspect a regression here first.
   limitation). Net: with suppression off, config C ≈ **1 built-in + 6 [SB-C] =
   ~7/15** pending a clean re-run; T1547.001 could make 8 if the parse is fixed.
 
+## Clean config C result (run 289b61d3, 2026-10-11, suppression OFF)
+
+**7/15 caught (46.7%) raw, up from config B 1/15.** Caught: T1059.003 (M, 93s),
+T1059.001 (M, 88s), T1569.002 (H, 566s), T1136.001 (H, 561s), T1053.005
+(H, 562s), T1110.001 (M, 553s), T1685.005 (M, 131s). Missed: T1547.001 +
+T1003.001 (documented residuals) and the 6 requires_tuning no-rule techniques.
+The suppression fix worked — the 4 High/Medium ~560s catches are the `[SB-C]`
+scheduled rules that were false-missed last run.
+
+**ATTRIBUTION PENDING — number may be 6, not 7.** T1059.001 caught at Medium,
+but its own `[SB-C]` rule is High → it was credited by something else. Prime
+suspect: the `[SB-C]` T1059.003 (cmd, Medium) rule is tagged only with the
+**parent `T1059`** (ARM forced parent-only tags), and T1059.001's match_ids
+include `T1059`, so the cmd rule can **cross-credit** PowerShell. If confirmed,
+honest config C = 6/15 and the deployer should tag the full sub-technique (add
+`subTechniques` back, test ARM accepts it) or the matcher should require the
+exact sub-id for our own rules. Resolve with
+`SecurityAlert | ago(4h) | project TimeGenerated, AlertName, AlertSeverity,
+Techniques` — map each caught technique to the rule that fired. Severity
+miscal = 2 (T1059.001, T1685.005, both Medium vs High). **A/B/C provisional:
+0 → 1 → 6-7, pending attribution.**
+
 ## Next — finish-line checklist
 
 Config A/B/C are built and the lab works end to end. What remains is turning
