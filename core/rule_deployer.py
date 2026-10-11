@@ -235,7 +235,14 @@ class RuleDeployer:
                 report.append({"technique_id": s["technique_id"],
                                "action": "skipped", "reason": "requires_tuning"})
                 continue
-            report.append(self.deploy_suggestion(s, dry_run=dry_run, **payload_kw))
+            # One bad rule (e.g. an ARM-rejected query) must not block the rest;
+            # record its error and carry on, so a single apply surfaces every
+            # failure at once instead of one VM round-trip per broken rule.
+            try:
+                report.append(self.deploy_suggestion(s, dry_run=dry_run, **payload_kw))
+            except RuleDeployerError as exc:
+                report.append({"technique_id": s["technique_id"],
+                               "action": "error", "error": str(exc)})
         return report
 
     def list_sb_rules(self) -> list[dict]:

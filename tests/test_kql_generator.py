@@ -19,6 +19,15 @@ def _active_lines(kql: str) -> list[str]:
     return [ln for ln in kql.splitlines() if not ln.strip().startswith("//")]
 
 
+@pytest.mark.parametrize("tid", list(TECHNIQUES))
+def test_generated_kql_avoids_invalid_operators(tid):
+    # KQL has no `!has_any` / `!has_all`; negate with not(x has_any (...)).
+    # ARM's parser rejects the bad form, so guard every generator.
+    kql = KQLGenerator().generate(tid, [{"EventID": 4688, "Process": "x.exe"}])["kql_query"]
+    assert "!has_any" not in kql
+    assert "!has_all" not in kql
+
+
 def test_grounding_comment_present_with_evidence_absent_without():
     gen = KQLGenerator()
     with_ev = gen.generate("T1059.003", [{"EventID": 4688, "Process": "cmd.exe"}])["kql_query"]

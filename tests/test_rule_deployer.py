@@ -123,6 +123,20 @@ def test_live_deploy_puts_to_arm_with_bearer_token():
     assert body["properties"]["displayName"].startswith(RULE_PREFIX)
 
 
+def test_deploy_run_records_errors_and_keeps_going(monkeypatch):
+    # A rule ARM rejects must not abort the whole batch.
+    fake = [_suggestion("T1059.003"), _suggestion("T1003.001")]
+    monkeypatch.setattr("core.db.get_kql_for_run", lambda run_id, *a, **k: fake)
+
+    class ErrSession(FakeSession):
+        def put(self, url, headers=None, json=None, timeout=None):
+            return FakeResponse(400, {"error": "bad query"})
+
+    report = _deployer(ErrSession()).deploy_run("run-1", dry_run=False)
+    assert [r["action"] for r in report] == ["error", "error"]
+    assert all("400" in r["error"] for r in report)
+
+
 def test_deploy_run_skips_requires_tuning_skeletons(monkeypatch):
     fake = [_suggestion("T1552.001", confidence="requires_tuning"),
             _suggestion("T1059.003", confidence="medium")]

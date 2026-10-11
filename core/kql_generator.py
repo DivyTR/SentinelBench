@@ -139,10 +139,10 @@ SecurityEvent
 | where TimeGenerated >= ago(1h)
 | where EventID == 4688
 | where Process =~ "cmd.exe"
-| where ParentProcessName !has_any (
+| where not(ParentProcessName has_any (
     "explorer.exe", "services.exe", "svchost.exe",
     "cmd.exe", "conhost.exe"
-  )
+  ))
 | project TimeGenerated, Computer, Account, Process,
           CommandLine, ParentProcessName
 | extend AttackTechnique = "T1059.003"
@@ -232,7 +232,7 @@ SecurityEvent
 | where EventID == 4698
 | extend TaskName = extract(@"<Data Name='TaskName'>([^<]+)<", 1, EventData)
 | where EventData has_any (
-    "\\Windows\\Temp\\", "\\AppData\\", "%TEMP%",
+    "\\\\Windows\\\\Temp\\\\", "\\\\AppData\\\\", "%TEMP%",
     "powershell", "cmd.exe", "wscript", "mshta"
   )
 | project TimeGenerated, Computer, SubjectUserName, TaskName,
@@ -290,7 +290,7 @@ SecurityEvent
 | where TimeGenerated >= ago(1h)
 | where EventID == 4656
 | where ObjectName has "lsass"
-| where SubjectUserName !has_any ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE")
+| where not(SubjectUserName has_any ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE"))
 | project TimeGenerated, Computer, SubjectUserName, ObjectName,
           ProcessName, HandleID
 | extend AttackTechnique = "T1003.001"

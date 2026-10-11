@@ -424,15 +424,22 @@ def _deploy_config_c(run_id: str, apply: bool) -> None:
     if not report:
         print("[config-c] No suggestions to deploy (all techniques caught, or none stored).")
         return
+    errors = 0
     for r in report:
         if r["action"] == "skipped":
             print(f"  {r['technique_id']:<14} skipped ({r['reason']})")
         elif r["action"] == "dry_run":
             print(f"  {r['technique_id']:<14} would PUT {r['payload']['properties']['displayName']}")
+        elif r["action"] == "error":
+            errors += 1
+            print(f"  {r['technique_id']:<14} ERROR {r['error']}")
         else:
             print(f"  {r['technique_id']:<14} deployed [{r['status_code']}] {r['displayName']}")
     if not apply:
         print("\n[config-c] Preview only. Re-run with --apply to write these rules to Sentinel.")
+    elif errors:
+        print(f"\n[config-c] {errors} rule(s) failed to deploy (see ERROR lines above).")
+        sys.exit(1)
 
 
 def _teardown_config_c(apply: bool) -> None:
