@@ -291,8 +291,7 @@ SecurityEvent
 | where EventID == 4656
 | where ObjectName has "lsass"
 | where not(SubjectUserName has_any ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE"))
-| project TimeGenerated, Computer, SubjectUserName, ObjectName,
-          ProcessName, HandleID
+| project TimeGenerated, Computer, SubjectUserName, ObjectName, ProcessName
 | extend AttackTechnique = "T1003.001"
 | union (
     Event
