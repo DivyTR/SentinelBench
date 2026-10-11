@@ -104,7 +104,8 @@ makes the caught count jump, suspect a regression here first.
 - **Config C — closed loop (BUILT + DEPLOYED):** generate rules for config B's
   gaps, deploy as `[SB-C]` scheduled rules via ARM, re-measure, show the gaps
   close. The headline claim, now real — see Status for results. A/B/C numbers:
-  **0/15 → 1/15 → ~6-7/15** (control → built-in → built-in + generated).
+  **0/15 → 1/15 → 7/15** (control → built-in → built-in + generated; the
+  generated rules add 6). Verified by cross-check (run 289b61d3).
 
 ## Honest limitations (already documented in README §Limitations)
 
@@ -268,18 +269,22 @@ T1003.001 (documented residuals) and the 6 requires_tuning no-rule techniques.
 The suppression fix worked — the 4 High/Medium ~560s catches are the `[SB-C]`
 scheduled rules that were false-missed last run.
 
-**ATTRIBUTION PENDING — number may be 6, not 7.** T1059.001 caught at Medium,
-but its own `[SB-C]` rule is High → it was credited by something else. Prime
-suspect: the `[SB-C]` T1059.003 (cmd, Medium) rule is tagged only with the
-**parent `T1059`** (ARM forced parent-only tags), and T1059.001's match_ids
-include `T1059`, so the cmd rule can **cross-credit** PowerShell. If confirmed,
-honest config C = 6/15 and the deployer should tag the full sub-technique (add
-`subTechniques` back, test ARM accepts it) or the matcher should require the
-exact sub-id for our own rules. Resolve with
-`SecurityAlert | ago(4h) | project TimeGenerated, AlertName, AlertSeverity,
-Techniques` — map each caught technique to the rule that fired. Severity
-miscal = 2 (T1059.001, T1685.005, both Medium vs High). **A/B/C provisional:
-0 → 1 → 6-7, pending attribution.**
+**ATTRIBUTION RESOLVED (SecurityAlert cross-check): 7/15 is real.** Both
+`[SB-C] T1059.001` (High) and `[SB-C] T1059.003` (Medium) fired as their own
+alerts — PowerShell was NOT merely cross-credited. All 7 catches are
+legitimate: **6 from generated `[SB-C]` rules** (T1059.001, T1059.003,
+T1569.002, T1136.001, T1053.005, T1110.001) + **1 built-in** (T1685.005
+log-clear). Config B caught 1; generated rules added 6.
+**Known nuance (severity, not catch count):** ARM forces parent-only technique
+tags, so both T1059.x rules carry `["T1059"]`; the matcher credits the earliest
+T1059-tagged alert, so T1059.001's recorded severity came from the cmd rule
+(Medium) rather than its own High rule. So of severity_miscal=2, one is genuine
+(T1685.005 built-in under-rates H→M) and one is this cross-attribution artifact
+(T1059.001). Catch count is exact; per-technique severity among sibling
+sub-techniques is imprecise. Fixable by tagging the full sub-technique (add
+`subTechniques`, verify ARM accepts alongside the parent) — NOT worth a 3rd
+~3h run; documented as a limitation. **A/B/C FINAL: 0 → 1 → 7** (built-ins
+catch 1; SentinelBench's generated rules close 6 of the gaps).
 
 ## Next — finish-line checklist
 
