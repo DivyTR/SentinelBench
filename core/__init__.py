@@ -8,6 +8,12 @@ core — SentinelBench internal modules.
   kql_generator.py    KQL rule generation for missed detections
 """
 
+from .aggregate import (
+    aggregate_batch,
+    aggregate_technique,
+    latency_stats,
+    wilson_interval,
+)
 from .db import init_db
 from .kql_generator import KQLGenerator
 from .metrics_engine import MetricsEngine, checkpoints_for_max_wait, latency_band
@@ -23,7 +29,11 @@ __all__ = [
     "RuleDeployer",
     "SentinelClient",
     "SimulationRunner",
+    "aggregate_batch",
+    "aggregate_technique",
     "checkpoints_for_max_wait",
     "init_db",
     "latency_band",
+    "latency_stats",
+    "wilson_interval",
 ]

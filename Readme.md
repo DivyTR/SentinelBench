@@ -170,6 +170,11 @@ python sentinelbench.py --technique T1059.003
 # the full 15-technique suite
 python sentinelbench.py --suite v1
 
+# run a config N times and report detection RATE + 95% CI + latency
+# distribution (a rate, not a single caught/missed bit)
+python sentinelbench.py --suite v1 --repeat 5 --config-label config-B
+python sentinelbench.py --aggregate-batch <batch_id>
+
 # a baseline/control run with a short cutoff (everything misses anyway)
 python sentinelbench.py --suite v1 --max-wait 3
 
@@ -209,6 +214,7 @@ These are the honest boundary conditions of v1 — several discovered by running
 5. **Severity is a rubric, not ground truth** (see Metrics).
 6. **Defender may pre-empt a technique.** Real-time protection can block e.g. the LSASS dump before it completes, changing what telemetry (and which detection) is possible.
 7. **15 techniques, Windows only.** A focused quality benchmark, not a coverage audit; Linux/macOS/cloud are out of scope for v1.
+8. **Published A/B/C numbers are single-run.** The harness now supports `--repeat N` to report a detection *rate* with a 95% confidence interval and a latency distribution (verified in `tests/test_aggregate.py`), but the headline numbers have not yet been re-collected under it. Re-measuring each config at `N≥5` is the next lab task — see [RESULTS.md](RESULTS.md#limitations).
 
 ---
 
@@ -217,7 +223,7 @@ These are the honest boundary conditions of v1 — several discovered by running
 | Version | Focus |
 |---|---|
 | **v1 (current)** | 15 Windows techniques · reproducible Terraform lab · correct measurement engine with integrity guards · config A/B/C experiment including the closed loop (generate → deploy → re-measure) · KQL suggestions for gaps · heatmap dashboard · [results write-up](RESULTS.md) |
-| **v2** | Richer per-technique behavioral templates (close the T1547.001 / LSASS gaps) · exact sub-technique rule tagging · repeated runs with variance · more technique coverage |
+| **v2** | Richer per-technique behavioral templates (close the T1547.001 / LSASS gaps) · exact sub-technique rule tagging · ~~repeated runs with variance~~ (done: `--repeat N`, pending live re-measurement) · more technique coverage |
 | **v3** | Expand technique set and tactics · Linux endpoint support · multi-run trend analysis · PDF/stakeholder reporting |
 
 ---

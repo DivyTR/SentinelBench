@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS runs (
     host            TEXT,                   -- hostname of the lab VM
     sentinel_workspace TEXT,               -- workspace ID used (not the secret)
     notes           TEXT,
-    dry_run         INTEGER NOT NULL DEFAULT 0  -- 1 = synthetic results, not a real measurement
+    dry_run         INTEGER NOT NULL DEFAULT 0, -- 1 = synthetic results, not a real measurement
+    batch_id        TEXT,                   -- groups repeated runs of one config (--repeat N)
+    config_label    TEXT                    -- human label for the batch, e.g. 'config-B'
 );
 
 CREATE TABLE IF NOT EXISTS results (
@@ -92,6 +94,8 @@ CREATE INDEX IF NOT EXISTS idx_kql_result     ON kql_suggestions(result_id);
 _MIGRATIONS = {
     "runs": {
         "dry_run": "INTEGER NOT NULL DEFAULT 0",
+        "batch_id": "TEXT",
+        "config_label": "TEXT",
     },
     "results": {
         "art_guid":                 "TEXT",
@@ -124,18 +128,26 @@ def create_run(
     sentinel_workspace: str,
     notes: str = "",
     dry_run: bool = False,
+    batch_id: str | None = None,
+    config_label: str | None = None,
     path: Path = DB_PATH,
 ) -> str:
-    """Insert a new run row and return its run_id."""
+    """Insert a new run row and return its run_id.
+
+    batch_id groups repeated runs of the same config (--repeat N) so they can
+    be aggregated; config_label is a human name for that batch.
+    """
     run_id = str(uuid.uuid4())
     started_at = _now()
     with get_connection(path) as conn:
         conn.execute(
             """
-            INSERT INTO runs (run_id, suite, started_at, host, sentinel_workspace, notes, dry_run)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO runs (run_id, suite, started_at, host, sentinel_workspace,
+                              notes, dry_run, batch_id, config_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, suite, started_at, host, sentinel_workspace, notes, int(dry_run)),
+            (run_id, suite, started_at, host, sentinel_workspace, notes,
+             int(dry_run), batch_id, config_label),
         )
     return run_id
 
@@ -161,6 +173,15 @@ def list_runs(limit: int = 20, path: Path = DB_PATH) -> list[dict]:
     with get_connection(path) as conn:
         rows = conn.execute(
             "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_runs_in_batch(batch_id: str, path: Path = DB_PATH) -> list[dict]:
+    """Return all runs sharing a batch_id, oldest first (--repeat N groups)."""
+    with get_connection(path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM runs WHERE batch_id = ? ORDER BY started_at", (batch_id,)
         ).fetchall()
     return [dict(r) for r in rows]
 

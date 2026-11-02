@@ -32,6 +32,7 @@ import json
 import os
 import socket
 import sys
+import uuid
 from datetime import datetime
 
 import requests
@@ -89,6 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-techniques", action="store_true",
         help="Print all v1 techniques and exit",
     )
+    mode.add_argument(
+        "--aggregate-batch", metavar="BATCH_ID", default=None,
+        help="Print the aggregated (multi-run) report for a stored batch",
+    )
     p.add_argument(
         "--dry-run", action="store_true",
         help="Simulate pipeline without executing ART or polling Sentinel",
@@ -108,6 +113,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--notes", metavar="TEXT", default="",
         help="Optional notes to attach to this run",
+    )
+    p.add_argument(
+        "--repeat", metavar="N", type=int, default=1,
+        help="Run the suite N times as one batch, then report per-technique "
+             "detection RATE with a confidence interval and a latency "
+             "distribution (default 1). N>=5 is recommended for a real "
+             "measurement — one run per config is an anecdote, not a rate.",
+    )
+    p.add_argument(
+        "--config-label", metavar="TEXT", default=None,
+        help="Human label for this batch (e.g. 'config-B'), stored on each run "
+             "and shown in the aggregate report.",
     )
     p.add_argument(
         "--max-wait", metavar="MIN", type=int, default=15,
@@ -175,6 +192,10 @@ def main() -> None:
 
     if args.history is not None:
         _print_history(args.history)
+        sys.exit(0)
+
+    if args.aggregate_batch is not None:
+        _print_batch_aggregate(args.aggregate_batch)
         sys.exit(0)
 
     if args.show_results and args.run_id:
@@ -245,29 +266,72 @@ def main() -> None:
         print("[mode] DRY RUN - no ART execution, synthetic alert data")
         client = None  # MetricsEngine handles dry_run internally
 
-    # Create the run record
+    if args.repeat < 1:
+        print("[error] --repeat must be >= 1")
+        sys.exit(1)
+
     host = socket.gethostname()
+    # A batch groups repeated runs so they can be aggregated into a rate.
+    # A single run has no batch (it stays an ungrouped, honest n=1).
+    batch_id = str(uuid.uuid4()) if args.repeat > 1 else None
+    config_label = args.config_label
+
+    if args.repeat > 1:
+        label = f" labelled '{config_label}'" if config_label else ""
+        print(f"[batch] {args.repeat} repeats{label}  batch_id={batch_id}")
+        print("[batch] Aggregating into per-technique detection rates + CIs.\n")
+
+    run_ids = []
+    for rep in range(1, args.repeat + 1):
+        if args.repeat > 1:
+            print(f"\n{'#' * 60}\n[batch] Repeat {rep}/{args.repeat}\n{'#' * 60}")
+        run_ids.append(_execute_suite(
+            techniques=techniques, suite_name=suite_name, dry_run=dry_run,
+            client=client, checkpoints=checkpoints, max_wait=args.max_wait,
+            notes=args.notes, host=host, batch_id=batch_id,
+            config_label=config_label,
+        ))
+
+    if args.repeat > 1:
+        _print_batch_aggregate(batch_id)
+        print(f"\n[batch] Re-view later: "
+              f"python sentinelbench.py --aggregate-batch {batch_id}")
+    else:
+        print(f"\n[run] View KQL suggestions: "
+              f"python sentinelbench.py --run-id {run_ids[0]} --show-kql")
+
+
+def _execute_suite(
+    *, techniques, suite_name, dry_run, client, checkpoints, max_wait,
+    notes, host, batch_id=None, config_label=None,
+) -> str:
+    """Run the suite once and persist a run. Returns the run_id.
+
+    One invocation = one run = one row per technique. --repeat calls this N
+    times under a shared batch_id; core.aggregate turns those N runs into a
+    detection rate with a confidence interval.
+    """
     run_id = create_run(
         suite=suite_name,
         host=host,
         sentinel_workspace="dry-run" if dry_run else os.environ.get("SENTINEL_WORKSPACE_ID"),
-        notes=args.notes,
+        notes=notes,
         dry_run=dry_run,
+        batch_id=batch_id,
+        config_label=config_label,
     )
     print(f"\n[run] Started run {run_id}")
     print(f"[run] Suite: {suite_name}  |  Techniques: {len(techniques)}\n")
 
-    runner  = SimulationRunner(dry_run=dry_run)
-    if args.max_wait != 15 and not dry_run:
-        print(f"[mode] Alert wait capped at T+{args.max_wait}min "
+    runner = SimulationRunner(dry_run=dry_run)
+    if max_wait != 15 and not dry_run:
+        print(f"[mode] Alert wait capped at T+{max_wait}min "
               f"(checkpoints: {', '.join(f'T+{c}min' for c in checkpoints)})")
 
     metrics = MetricsEngine(
         client=client, dry_run=dry_run, host=host, checkpoints=checkpoints,
     )
-    gen     = KQLGenerator()
-
-    results = []
+    gen = KQLGenerator()
 
     for i, technique_id in enumerate(techniques, 1):
         meta = TECHNIQUES[technique_id]
@@ -338,16 +402,10 @@ def main() -> None:
             )
             print(f"  [kql] KQL suggestion generated ({suggestion['confidence']} confidence)")
 
-        results.append({**sim_result, **measurement, "result_id": result_id})
-
-    # Finish the run
     finish_run(run_id)
-
-    # Print summary
     _print_run_summary(run_id)
-
     print(f"\n[run] Complete. Run ID: {run_id}")
-    print(f"[run] View KQL suggestions: python sentinelbench.py --run-id {run_id} --show-kql")
+    return run_id
 
 
 # ── display helpers ────────────────────────────────────────────────────────────
@@ -364,6 +422,47 @@ def _print_run_summary(run_id: str) -> None:
     print(f"  Avg latency     : {avg:.0f}s" if avg is not None else "  Avg latency     : n/a")
     print(f"  Severity miscal.: {summary['severity_miscalibrations']}")
     print(f"{'=' * 60}")
+
+
+def _print_batch_aggregate(batch_id: str) -> None:
+    """Print the multi-run aggregate for a batch: per-technique detection rate
+    with a 95% confidence interval and a latency distribution."""
+    from core.aggregate import aggregate_batch
+    from core.db import get_results_for_run, get_runs_in_batch
+
+    runs = get_runs_in_batch(batch_id)
+    if not runs:
+        print(f"[aggregate] No runs found for batch {batch_id}")
+        return
+    label = runs[0].get("config_label") or "(unlabelled)"
+    agg = aggregate_batch([get_results_for_run(r["run_id"]) for r in runs])
+
+    cov = agg["coverage_mean_pct"]
+    cov_s = f"{cov}% ± {agg['coverage_stdev_pct']}%" if cov is not None else "n/a"
+    print(f"\n{'=' * 78}")
+    print(f"  Batch Aggregate - {label}   (batch {batch_id[:8]}...)")
+    print(f"{'-' * 78}")
+    print(f"  Runs: {agg['n_runs']}   Techniques: {agg['n_techniques']}")
+    print(f"  Coverage (mean across runs +/- stdev): {cov_s}")
+    print(f"  Flaky (caught in some runs, not all)  : {agg['flaky_count']}")
+    print(f"{'-' * 78}")
+    print(f"  {'Technique':<13} {'Detect rate':<16} {'95% CI':<12} "
+          f"{'Latency s (mean/med, sd)':<26} {'Severity'}")
+    print(f"  {'-' * 74}")
+    for t in agg["techniques"]:
+        rate = f"{t['detections']}/{t['trials']} ({t['detection_rate'] * 100:.0f}%)"
+        ci = f"{t['rate_ci_low'] * 100:.0f}-{t['rate_ci_high'] * 100:.0f}%"
+        lat = t["latency"]
+        lat_s = (f"{lat['mean']:.0f}/{lat['median']:.0f} (sd {lat['stdev']:.0f})"
+                 if lat else "-")
+        sev = t["severity_mode"] or "-"
+        if t["severity_mode"] and not t["severity_consistent"]:
+            sev += "*"          # severity varied across runs
+        flag = "  flaky" if t["flaky"] else ""
+        print(f"  {t['technique_id']:<13} {rate:<16} {ci:<12} {lat_s:<26} {sev}{flag}")
+    print(f"{'=' * 78}")
+    print("  * severity varied across runs (mode shown). "
+          "CI = Wilson 95%.  Rate over all runs; latency over caught runs only.")
 
 
 def _print_techniques() -> None:

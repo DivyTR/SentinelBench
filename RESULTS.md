@@ -164,9 +164,22 @@ missed — verified at the alert level: each caught technique's own rule fired.
 - **Brute force (T1110.001) produces no source IP** (local `LogonUser` API), so
   source-IP-correlation rules can't fire; the generated rule catches on the failure
   *volume* instead.
-- **One run per config.** T1136.001 is timing-variable, so config B can read 1 or 2
-  depending on cleanup timing; repeated runs for variance are future work. Config A
-  (0/15) is the definitional floor, not a separately timed run.
+- **The published numbers above are single-run (n=1 per config).** T1136.001 is
+  timing-variable, so config B can read 1 or 2 depending on cleanup timing. A single
+  run gives a caught/missed bit per technique, not a detection *rate* — one lucky or
+  unlucky run can move the headline. Config A (0/15) is the definitional floor, not a
+  separately timed run.
+
+  **Mitigation now in the tool (results pending re-measurement).** The harness supports
+  `--repeat N`, which runs a config N times as one batch and reports a per-technique
+  **detection rate with a Wilson 95% confidence interval** and a **latency distribution**
+  (mean / median / stdev) instead of a single sample, and flags techniques that are
+  *flaky* (caught in some runs, not all) — exactly the T1136.001 case. This converts the
+  measurement from an anecdote into a rate with stated uncertainty. The A/B/C numbers in
+  this document have **not** yet been re-run under `--repeat`, so they remain single-run;
+  re-measuring each config at `N≥5` to attach confidence intervals is the next lab task.
+  The statistics are covered by unit tests (`tests/test_aggregate.py`), so the method is
+  verified even though the live multi-run numbers are not yet collected.
 
 ---
 
@@ -177,7 +190,12 @@ missed — verified at the alert level: each caught technique's own rule fired.
 cd infra/terraform && terraform apply
 
 # 2. Run the suite
-python sentinelbench.py --suite v1                       # config B / C
+python sentinelbench.py --suite v1                       # config B / C (single run)
+
+# 2b. Statistically rigorous: run a config N times and report detection
+#     rate + 95% CI + latency distribution instead of a single caught/missed bit
+python sentinelbench.py --suite v1 --repeat 5 --config-label config-B
+python sentinelbench.py --aggregate-batch <batch_id>     # re-view the aggregate
 
 # 3. Config C: generate, deploy, re-measure
 python sentinelbench.py --deploy-config-c --run-id <run> --apply
